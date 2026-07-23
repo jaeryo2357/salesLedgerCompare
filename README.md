@@ -4,7 +4,11 @@
 
 ## 로컬 실행
 
+Node.js 22 LTS를 사용합니다. 이 프로젝트는 `npm` 기준으로 설치합니다. `pnpm`으로 설치된 `node_modules`가 이미 있다면 먼저 삭제한 뒤 진행하세요.
+
 ```bash
+nvm use 22
+rm -rf node_modules
 npm install
 npm start
 ```
