@@ -1,0 +1,10 @@
+services:
+  - type: web
+    name: excel-purchase-comparer
+    runtime: node
+    buildCommand: npm install
+    startCommand: npm start
+    healthCheckPath: /
+    envVars:
+      - key: NODE_VERSION
+        value: 20
