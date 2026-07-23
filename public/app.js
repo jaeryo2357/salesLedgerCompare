@@ -1,26 +1,21 @@
-const form = document.querySelector("#compare-form");
-const status = document.querySelector("#status");
-const button = form.querySelector("button");
-
-form.addEventListener("submit", async (event) => {
-  event.preventDefault();
-  const data = new FormData(form);
-  button.disabled = true;
-  status.textContent = "엑셀을 비교하는 중입니다…";
-  try {
-    const response = await fetch("/api/compare", { method: "POST", body: data });
-    if (!response.ok) throw new Error((await response.json()).error || "처리에 실패했습니다.");
-    const blob = await response.blob();
-    const link = document.createElement("a");
-    link.href = URL.createObjectURL(blob);
-    link.download = "B_색상표시_비교결과.xlsx";
-    link.click();
-    URL.revokeObjectURL(link.href);
-    const stats = JSON.parse(decodeURIComponent(response.headers.get("X-Compare-Stats") || "%7B%7D"));
-    status.textContent = `완료: 노랑 ${stats.yellowCells ?? 0}셀 · 빨강 ${stats.redCells ?? 0}셀`;
-  } catch (error) {
-    status.textContent = error.message;
-  } finally {
-    button.disabled = false;
-  }
-});
+/* global XLSX */
+const FIELDS = [{ a: "A", b: "C", type: "date" }, { a: "D", b: "G", type: "text" }, { a: "E", b: "E", type: "text" }, { a: "F", b: "AA", fallbackB: "Y", type: "text" }, { a: "G", b: "AC", type: "number" }, { a: "H", b: "AD", type: "number" }, { a: "K", b: "P", fallbackB: "AE", type: "number" }, { a: "L", b: "Q", fallbackB: "AF", type: "number" }];
+const COLORS = { missing: "FFF2CC", different: "F4CCCC" };
+const text = (cell) => (cell?.w ?? cell?.v ?? "").toString().trim();
+const usable = (cell) => text(cell) !== "";
+const digits = (cell) => text(cell).replace(/[^0-9A-Za-z]/g, "").toUpperCase();
+const numeric = (cell) => { const n = Number(text(cell).replace(/,/g, "").replace(/[^0-9.-]/g, "")); return Number.isFinite(n) ? n : null; };
+const dateKey = (cell) => { const m = text(cell).match(/(\d{4})\D?(\d{1,2})\D?(\d{1,2})/); return m ? `${m[1]}${m[2].padStart(2, "0")}${m[3].padStart(2, "0")}` : digits(cell); };
+const address = (column, row) => `${column}${row}`;
+const bCell = (sheet, row, field) => sheet[address(field.b, row)] ?? (field.fallbackB ? sheet[address(field.fallbackB, row)] : undefined);
+function rowsWithData(sheet, firstRow, lastRow, columns) { const rows = []; for (let r = firstRow; r <= lastRow; r += 1) if (columns.some((c) => usable(sheet[address(c, r)]))) rows.push(r); return rows; }
+function keyA(s, r) { return [digits(s[address("E", r)]), dateKey(s[address("A", r)]), numeric(s[address("K", r)]) ?? "", numeric(s[address("L", r)]) ?? ""].join("|"); }
+function keyB(s, r) { return [digits(s[address("E", r)]), dateKey(s[address("C", r)]), numeric(s[address("P", r)]) ?? numeric(s[address("AE", r)]) ?? "", numeric(s[address("Q", r)]) ?? numeric(s[address("AF", r)]) ?? ""].join("|"); }
+function partyDateA(s, r) { return [digits(s[address("E", r)]), dateKey(s[address("A", r)])].join("|"); }
+function partyDateB(s, r) { return [digits(s[address("E", r)]), dateKey(s[address("C", r)])].join("|"); }
+function same(a, b, type) { if (type === "number") { const x = numeric(a); const y = numeric(b); return x !== null && y !== null && Math.abs(x - y) < .000001; } return type === "date" ? dateKey(a) === dateKey(b) : text(a).replace(/\s+/g, " ").toUpperCase() === text(b).replace(/\s+/g, " ").toUpperCase(); }
+function color(cell, rgb) { cell.s = { ...(cell.s ?? {}), fill: { patternType: "solid", fgColor: { rgb } } }; }
+function add(map, key, row) { map.set(key, [...(map.get(key) ?? []), row]); }
+function compare(aBytes, bBytes) { const aBook = XLSX.read(aBytes, { type: "array", cellStyles: true, cellDates: true }); const bBook = XLSX.read(bBytes, { type: "array", cellStyles: true, cellDates: true }); const aSheet = aBook.Sheets[aBook.SheetNames[0]]; const bSheet = bBook.Sheets[bBook.SheetNames[0]]; const aRows = rowsWithData(aSheet, 3, XLSX.utils.decode_range(aSheet["!ref"] || "A1:A1").e.r + 1, ["A", "D", "E", "F", "K", "L"]); const bRows = rowsWithData(bSheet, 7, XLSX.utils.decode_range(bSheet["!ref"] || "A1:A1").e.r + 1, ["C", "E", "G", "P", "Q", "AA", "AE"]); const exact = new Map(); const party = new Map(); for (const row of aRows) { add(exact, keyA(aSheet, row), row); add(party, partyDateA(aSheet, row), row); } const used = new Set(); let yellow = 0; let red = 0; for (const bRow of bRows) { const exactRows = (exact.get(keyB(bSheet, bRow)) || []).filter((r) => !used.has(r)); const partyRows = (party.get(partyDateB(bSheet, bRow)) || []).filter((r) => !used.has(r)); const aRow = exactRows.length === 1 ? exactRows[0] : partyRows.length === 1 ? partyRows[0] : undefined; if (!aRow) { for (const field of FIELDS) { const target = bCell(bSheet, bRow, field); if (usable(target)) { color(target, COLORS.missing); yellow += 1; } } continue; } used.add(aRow); for (const field of FIELDS) { const target = bCell(bSheet, bRow, field); if (!usable(target)) continue; const source = aSheet[address(field.a, aRow)]; if (!usable(source)) { color(target, COLORS.missing); yellow += 1; } else if (!same(source, target, field.type)) { color(target, COLORS.different); red += 1; } } } return { data: XLSX.write(bBook, { type: "array", bookType: "xlsx", cellStyles: true }), yellow, red }; }
+const form = document.querySelector("#compare-form"); const status = document.querySelector("#status"); const button = form.querySelector("button");
+form.addEventListener("submit", async (event) => { event.preventDefault(); button.disabled = true; status.textContent = "이 브라우저 안에서 엑셀을 비교하는 중입니다…"; try { const a = form.elements.aFile.files[0]; const b = form.elements.bFile.files[0]; const result = compare(new Uint8Array(await a.arrayBuffer()), new Uint8Array(await b.arrayBuffer())); const link = document.createElement("a"); link.href = URL.createObjectURL(new Blob([result.data], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" })); link.download = "B_색상표시_비교결과.xlsx"; link.click(); setTimeout(() => URL.revokeObjectURL(link.href), 0); status.textContent = `완료: 노랑 ${result.yellow}셀 · 빨강 ${result.red}셀`; } catch (error) { status.textContent = `처리 오류: ${error.message}`; } finally { button.disabled = false; } });

@@ -1,10 +1,13 @@
 services:
   - type: web
+    runtime: static
     name: excel-purchase-comparer
-    runtime: node
-    buildCommand: npm install
-    startCommand: npm start
-    healthCheckPath: /
-    envVars:
-      - key: NODE_VERSION
-        value: 22
+    buildCommand: ""
+    staticPublishPath: ./public
+    headers:
+      - path: /*
+        name: X-Frame-Options
+        value: DENY
+      - path: /*
+        name: X-Content-Type-Options
+        value: nosniff
