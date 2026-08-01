@@ -9,13 +9,44 @@ const dateKey = (cell) => { const m = text(cell).match(/(\d{4})\D?(\d{1,2})\D?(\
 const address = (column, row) => `${column}${row}`;
 const bCell = (sheet, row, field) => sheet[address(field.b, row)] ?? (field.fallbackB ? sheet[address(field.fallbackB, row)] : undefined);
 function rowsWithData(sheet, firstRow, lastRow, columns) { const rows = []; for (let r = firstRow; r <= lastRow; r += 1) if (columns.some((c) => usable(sheet[address(c, r)]))) rows.push(r); return rows; }
-function keyA(s, r) { return [digits(s[address("E", r)]), dateKey(s[address("A", r)]), numeric(s[address("K", r)]) ?? "", numeric(s[address("L", r)]) ?? ""].join("|"); }
-function keyB(s, r) { return [digits(s[address("E", r)]), dateKey(s[address("C", r)]), numeric(s[address("P", r)]) ?? numeric(s[address("AE", r)]) ?? "", numeric(s[address("Q", r)]) ?? numeric(s[address("AF", r)]) ?? ""].join("|"); }
+const taxMode = (cell) => { const value = text(cell).replace(/\s+/g, "").toLowerCase(); return value.includes("면세") ? "exempt" : value.includes("불공") ? "disallowed" : "standard"; };
+function keyA(s, r, mode) {
+  const base = [digits(s[address("E", r)]), numeric(s[address("K", r)]) ?? ""];
+  if (mode === "disallowed") base.push(numeric(s[address("L", r)]) ?? "");
+  else if (mode === "standard") base.push(dateKey(s[address("A", r)]), numeric(s[address("L", r)]) ?? "");
+  return base.join("|");
+}
+function keyB(s, r, mode) {
+  const base = [digits(s[address("E", r)]), numeric(s[address("P", r)]) ?? numeric(s[address("AE", r)]) ?? ""];
+  if (mode === "disallowed") base.push(numeric(s[address("Q", r)]) ?? numeric(s[address("AF", r)]) ?? "");
+  else if (mode === "standard") base.push(dateKey(s[address("C", r)]), numeric(s[address("Q", r)]) ?? numeric(s[address("AF", r)]) ?? "");
+  return base.join("|");
+}
 function partyDateA(s, r) { return [digits(s[address("E", r)]), dateKey(s[address("A", r)])].join("|"); }
 function partyDateB(s, r) { return [digits(s[address("E", r)]), dateKey(s[address("C", r)])].join("|"); }
 function same(a, b, type) { if (type === "number") { const x = numeric(a); const y = numeric(b); return x !== null && y !== null && Math.abs(x - y) < .000001; } return type === "date" ? dateKey(a) === dateKey(b) : text(a).replace(/\s+/g, " ").toUpperCase() === text(b).replace(/\s+/g, " ").toUpperCase(); }
 function color(cell, rgb) { cell.s = { ...(cell.s ?? {}), fill: { patternType: "solid", fgColor: { rgb } } }; }
 function add(map, key, row) { map.set(key, [...(map.get(key) ?? []), row]); }
 function compare(aBytes, bBytes) { const aBook = XLSX.read(aBytes, { type: "array", cellStyles: true, cellDates: true }); const bBook = XLSX.read(bBytes, { type: "array", cellStyles: true, cellDates: true }); const aSheet = aBook.Sheets[aBook.SheetNames[0]]; const bSheet = bBook.Sheets[bBook.SheetNames[0]]; const aRows = rowsWithData(aSheet, 3, XLSX.utils.decode_range(aSheet["!ref"] || "A1:A1").e.r + 1, ["A", "D", "E", "F", "K", "L"]); const bRows = rowsWithData(bSheet, 7, XLSX.utils.decode_range(bSheet["!ref"] || "A1:A1").e.r + 1, ["C", "E", "G", "P", "Q", "AA", "AE"]); const exact = new Map(); const party = new Map(); for (const row of aRows) { add(exact, keyA(aSheet, row), row); add(party, partyDateA(aSheet, row), row); } const used = new Set(); let yellow = 0; let red = 0; for (const bRow of bRows) { const exactRows = (exact.get(keyB(bSheet, bRow)) || []).filter((r) => !used.has(r)); const partyRows = (party.get(partyDateB(bSheet, bRow)) || []).filter((r) => !used.has(r)); const aRow = exactRows.length === 1 ? exactRows[0] : partyRows.length === 1 ? partyRows[0] : undefined; if (!aRow) { for (const field of FIELDS) { const target = bCell(bSheet, bRow, field); if (usable(target)) { color(target, COLORS.missing); yellow += 1; } } continue; } used.add(aRow); for (const field of FIELDS) { const target = bCell(bSheet, bRow, field); if (!usable(target)) continue; const source = aSheet[address(field.a, aRow)]; if (!usable(source)) { color(target, COLORS.missing); yellow += 1; } else if (!same(source, target, field.type)) { color(target, COLORS.different); red += 1; } } } return { data: XLSX.write(bBook, { type: "array", bookType: "xlsx", cellStyles: true }), yellow, red }; }
+function compareByTaxType(aBytes, bBytes) {
+  const aBook = XLSX.read(aBytes, { type: "array", cellStyles: true, cellDates: true });
+  const bBook = XLSX.read(bBytes, { type: "array", cellStyles: true, cellDates: true });
+  const aSheet = aBook.Sheets[aBook.SheetNames[0]]; const bSheet = bBook.Sheets[bBook.SheetNames[0]];
+  const aRows = rowsWithData(aSheet, 3, XLSX.utils.decode_range(aSheet["!ref"] || "A1:A1").e.r + 1, ["A", "C", "D", "E", "F", "K", "L"]);
+  const bRows = rowsWithData(bSheet, 7, XLSX.utils.decode_range(bSheet["!ref"] || "A1:A1").e.r + 1, ["C", "E", "G", "P", "Q", "AA", "AE"]);
+  const exact = { exempt: new Map(), disallowed: new Map(), standard: new Map() }; const standardPartyDate = new Map();
+  for (const row of aRows) { const mode = taxMode(aSheet[address("C", row)]); add(exact[mode], keyA(aSheet, row, mode), row); if (mode === "standard") add(standardPartyDate, partyDateA(aSheet, row), row); }
+  const used = new Set(); let yellow = 0; let red = 0;
+  for (const bRow of bRows) {
+    const candidates = [];
+    for (const mode of ["exempt", "disallowed", "standard"]) for (const row of (exact[mode].get(keyB(bSheet, bRow, mode)) || [])) if (!used.has(row) && !candidates.includes(row)) candidates.push(row);
+    for (const row of (standardPartyDate.get(partyDateB(bSheet, bRow)) || [])) if (!used.has(row) && !candidates.includes(row)) candidates.push(row);
+    const aRow = candidates.length === 1 ? candidates[0] : undefined;
+    if (!aRow) { for (const field of FIELDS) { const target = bCell(bSheet, bRow, field); if (usable(target)) { color(target, COLORS.missing); yellow += 1; } } continue; }
+    used.add(aRow);
+    for (const field of FIELDS) { const target = bCell(bSheet, bRow, field); if (!usable(target)) continue; const source = aSheet[address(field.a, aRow)]; if (!usable(source)) { color(target, COLORS.missing); yellow += 1; } else if (!same(source, target, field.type)) { color(target, COLORS.different); red += 1; } }
+  }
+  return { data: XLSX.write(bBook, { type: "array", bookType: "xlsx", cellStyles: true }), yellow, red };
+}
 const form = document.querySelector("#compare-form"); const status = document.querySelector("#status"); const button = form.querySelector("button");
-form.addEventListener("submit", async (event) => { event.preventDefault(); button.disabled = true; status.textContent = "이 브라우저 안에서 엑셀을 비교하는 중입니다…"; try { const a = form.elements.aFile.files[0]; const b = form.elements.bFile.files[0]; const result = compare(new Uint8Array(await a.arrayBuffer()), new Uint8Array(await b.arrayBuffer())); const link = document.createElement("a"); link.href = URL.createObjectURL(new Blob([result.data], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" })); link.download = "B_색상표시_비교결과.xlsx"; link.click(); setTimeout(() => URL.revokeObjectURL(link.href), 0); status.textContent = `완료: 노랑 ${result.yellow}셀 · 빨강 ${result.red}셀`; } catch (error) { status.textContent = `처리 오류: ${error.message}`; } finally { button.disabled = false; } });
+form.addEventListener("submit", async (event) => { event.preventDefault(); button.disabled = true; status.textContent = "이 브라우저 안에서 엑셀을 비교하는 중입니다…"; try { const a = form.elements.aFile.files[0]; const b = form.elements.bFile.files[0]; const result = compareByTaxType(new Uint8Array(await a.arrayBuffer()), new Uint8Array(await b.arrayBuffer())); const link = document.createElement("a"); link.href = URL.createObjectURL(new Blob([result.data], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" })); link.download = "B_색상표시_비교결과.xlsx"; link.click(); setTimeout(() => URL.revokeObjectURL(link.href), 0); status.textContent = `완료: 노랑 ${result.yellow}셀 · 빨강 ${result.red}셀`; } catch (error) { status.textContent = `처리 오류: ${error.message}`; } finally { button.disabled = false; } });
