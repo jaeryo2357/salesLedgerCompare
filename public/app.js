@@ -48,5 +48,36 @@ function compareByTaxType(aBytes, bBytes) {
   }
   return { data: XLSX.write(bBook, { type: "array", bookType: "xlsx", cellStyles: true }), yellow, red };
 }
+function compareByBusinessGroups(aBytes, bBytes) {
+  const aBook = XLSX.read(aBytes, { type: "array", cellStyles: true, cellDates: true });
+  const bBook = XLSX.read(bBytes, { type: "array", cellStyles: true, cellDates: true });
+  const aSheet = aBook.Sheets[aBook.SheetNames[0]]; const bSheet = bBook.Sheets[bBook.SheetNames[0]];
+  const aRows = rowsWithData(aSheet, 3, XLSX.utils.decode_range(aSheet["!ref"] || "A1:A1").e.r + 1, ["A", "C", "D", "E", "F", "K", "L"]);
+  const bRows = rowsWithData(bSheet, 7, XLSX.utils.decode_range(bSheet["!ref"] || "A1:A1").e.r + 1, ["C", "E", "G", "P", "Q", "AA", "AE"]);
+  const aGroups = new Map(); const bGroups = new Map();
+  for (const row of aRows) { const businessNumber = digits(aSheet[address("E", row)]); if (businessNumber) add(aGroups, businessNumber, row); }
+  const used = new Set(); let yellow = 0; let red = 0; let countMismatch = 0;
+  const paintBRow = (row) => { for (const field of FIELDS) { const target = bCell(bSheet, row, field); if (usable(target)) { color(target, COLORS.missing); yellow += 1; } } };
+  for (const row of bRows) { const businessNumber = digits(bSheet[address("E", row)]); if (businessNumber) add(bGroups, businessNumber, row); else paintBRow(row); }
+  for (const [businessNumber, bBusinessRows] of bGroups) {
+    const aBusinessRows = aGroups.get(businessNumber) || [];
+    const hasCountMismatch = aBusinessRows.length !== bBusinessRows.length;
+    if (hasCountMismatch) countMismatch += 1;
+    for (const bRow of bBusinessRows) {
+      if (hasCountMismatch) color(bSheet[address("E", bRow)], COLORS.missing);
+      const candidates = [];
+      for (const aRow of aBusinessRows) {
+        if (used.has(aRow)) continue;
+        const mode = taxMode(aSheet[address("C", aRow)]);
+        if (keyA(aSheet, aRow, mode) === keyB(bSheet, bRow, mode)) candidates.push(aRow);
+      }
+      const aRow = candidates.length === 1 ? candidates[0] : undefined;
+      if (!aRow) { paintBRow(bRow); continue; }
+      used.add(aRow);
+      for (const field of FIELDS) { const target = bCell(bSheet, bRow, field); if (!usable(target)) continue; const source = aSheet[address(field.a, aRow)]; if (!usable(source)) { color(target, COLORS.missing); yellow += 1; } else if (!same(source, target, field.type)) { color(target, COLORS.different); red += 1; } }
+    }
+  }
+  return { data: XLSX.write(bBook, { type: "array", bookType: "xlsx", cellStyles: true }), yellow, red, countMismatch };
+}
 const form = document.querySelector("#compare-form"); const status = document.querySelector("#status"); const button = form.querySelector("button");
-form.addEventListener("submit", async (event) => { event.preventDefault(); button.disabled = true; status.textContent = "이 브라우저 안에서 엑셀을 비교하는 중입니다…"; try { const a = form.elements.aFile.files[0]; const b = form.elements.bFile.files[0]; const result = compareByTaxType(new Uint8Array(await a.arrayBuffer()), new Uint8Array(await b.arrayBuffer())); const link = document.createElement("a"); link.href = URL.createObjectURL(new Blob([result.data], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" })); link.download = "B_색상표시_비교결과.xlsx"; link.click(); setTimeout(() => URL.revokeObjectURL(link.href), 0); status.textContent = `완료: 노랑 ${result.yellow}셀 · 빨강 ${result.red}셀`; } catch (error) { status.textContent = `처리 오류: ${error.message}`; } finally { button.disabled = false; } });
+form.addEventListener("submit", async (event) => { event.preventDefault(); button.disabled = true; status.textContent = "이 브라우저 안에서 엑셀을 비교하는 중입니다…"; try { const a = form.elements.aFile.files[0]; const b = form.elements.bFile.files[0]; const result = compareByBusinessGroups(new Uint8Array(await a.arrayBuffer()), new Uint8Array(await b.arrayBuffer())); const link = document.createElement("a"); link.href = URL.createObjectURL(new Blob([result.data], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" })); link.download = "B_색상표시_비교결과.xlsx"; link.click(); setTimeout(() => URL.revokeObjectURL(link.href), 0); status.textContent = `완료: 노랑 ${result.yellow}셀 · 빨강 ${result.red}셀 · 사업자별 행 수 차이 ${result.countMismatch}개`; } catch (error) { status.textContent = `처리 오류: ${error.message}`; } finally { button.disabled = false; } });
