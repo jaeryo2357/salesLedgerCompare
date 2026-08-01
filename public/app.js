@@ -1,87 +1,188 @@
 /* global XLSX */
-const FIELDS = [{ a: "A", b: "C", type: "date" }, { a: "D", b: "G", type: "text" }, { a: "E", b: "E", type: "business" }, { a: "F", b: "AA", type: "text" }, { a: "G", b: "AC", type: "number" }, { a: "H", b: "AD", type: "number" }, { a: "K", b: "P", fallbackB: "AE", type: "number" }, { a: "L", b: "Q", fallbackB: "AF", type: "number" }];
 // 노랑은 값 불일치, 빨강은 B에 대응하는 A 행/값이 없는 경우에만 사용합니다.
 const COLORS = { missing: "F4CCCC", different: "FFF2CC" };
+const A_HEADERS = {
+  business: ["사업자(주민)번호", "사업자등록번호", "사업자번호"],
+  supply: ["매입 공급가액", "매입공급가액"],
+  tax: ["매입 부가세", "매입부가세", "매입세액"],
+  taxType: ["과세유형", "과세 구분", "과세구분"],
+};
+const B_HEADERS = {
+  business: ["공급자사업자등록번호", "사업자등록번호", "사업자번호"],
+  supply: ["공급가액", "품목공급가액"],
+  tax: ["세액", "품목세액", "부가세"],
+};
+
 const text = (cell) => (cell?.w ?? cell?.v ?? "").toString().trim();
 const usable = (cell) => text(cell) !== "";
 const digits = (cell) => text(cell).replace(/[^0-9A-Za-z]/g, "").toUpperCase();
-const numeric = (cell) => { const n = Number(text(cell).replace(/,/g, "").replace(/[^0-9.-]/g, "")); return Number.isFinite(n) ? n : null; };
-const dateKey = (cell) => { const m = text(cell).match(/(\d{4})\D?(\d{1,2})\D?(\d{1,2})/); return m ? `${m[1]}${m[2].padStart(2, "0")}${m[3].padStart(2, "0")}` : digits(cell); };
-const address = (column, row) => `${column}${row}`;
-const bCell = (sheet, row, field) => {
-  const primary = sheet[address(field.b, row)];
-  return usable(primary) || !field.fallbackB ? primary : sheet[address(field.fallbackB, row)];
+const numeric = (cell) => {
+  const raw = text(cell);
+  if (!raw) return null;
+  const value = Number(raw.replace(/,/g, "").replace(/[^0-9.-]/g, ""));
+  return Number.isFinite(value) ? value : null;
 };
-function rowsWithData(sheet, firstRow, lastRow, columns) { const rows = []; for (let r = firstRow; r <= lastRow; r += 1) if (columns.some((c) => usable(sheet[address(c, r)]))) rows.push(r); return rows; }
-const taxMode = (cell) => { const value = text(cell).replace(/\s+/g, "").toLowerCase(); return value.includes("면세") ? "exempt" : value.includes("불공") ? "disallowed" : "standard"; };
-function keyA(s, r, mode) {
-  const base = [digits(s[address("E", r)]), numeric(s[address("K", r)]) ?? ""];
-  if (mode === "disallowed") base.push(numeric(s[address("L", r)]) ?? "");
-  else if (mode === "standard") base.push(dateKey(s[address("A", r)]), numeric(s[address("L", r)]) ?? "");
-  return base.join("|");
-}
-function keyB(s, r, mode) {
-  const base = [digits(s[address("E", r)]), numeric(s[address("P", r)]) ?? numeric(s[address("AE", r)]) ?? ""];
-  if (mode === "disallowed") base.push(numeric(s[address("Q", r)]) ?? numeric(s[address("AF", r)]) ?? "");
-  else if (mode === "standard") base.push(dateKey(s[address("C", r)]), numeric(s[address("Q", r)]) ?? numeric(s[address("AF", r)]) ?? "");
-  return base.join("|");
-}
-function partyDateA(s, r) { return [digits(s[address("E", r)]), dateKey(s[address("A", r)])].join("|"); }
-function partyDateB(s, r) { return [digits(s[address("E", r)]), dateKey(s[address("C", r)])].join("|"); }
-function same(a, b, type) { if (type === "number") { const x = numeric(a); const y = numeric(b); return x !== null && y !== null && Math.abs(x - y) < .000001; } if (type === "business") return digits(a) === digits(b); return type === "date" ? dateKey(a) === dateKey(b) : text(a).replace(/\s+/g, " ").toUpperCase() === text(b).replace(/\s+/g, " ").toUpperCase(); }
-function color(cell, rgb) { cell.s = { ...(cell.s ?? {}), fill: { patternType: "solid", fgColor: { rgb } } }; }
-function add(map, key, row) { map.set(key, [...(map.get(key) ?? []), row]); }
-function compare(aBytes, bBytes) { const aBook = XLSX.read(aBytes, { type: "array", cellStyles: true, cellDates: true }); const bBook = XLSX.read(bBytes, { type: "array", cellStyles: true, cellDates: true }); const aSheet = aBook.Sheets[aBook.SheetNames[0]]; const bSheet = bBook.Sheets[bBook.SheetNames[0]]; const aRows = rowsWithData(aSheet, 3, XLSX.utils.decode_range(aSheet["!ref"] || "A1:A1").e.r + 1, ["A", "D", "E", "F", "K", "L"]); const bRows = rowsWithData(bSheet, 7, XLSX.utils.decode_range(bSheet["!ref"] || "A1:A1").e.r + 1, ["C", "E", "G", "P", "Q", "AA", "AE"]); const exact = new Map(); const party = new Map(); for (const row of aRows) { add(exact, keyA(aSheet, row), row); add(party, partyDateA(aSheet, row), row); } const used = new Set(); let yellow = 0; let red = 0; for (const bRow of bRows) { const exactRows = (exact.get(keyB(bSheet, bRow)) || []).filter((r) => !used.has(r)); const partyRows = (party.get(partyDateB(bSheet, bRow)) || []).filter((r) => !used.has(r)); const aRow = exactRows.length === 1 ? exactRows[0] : partyRows.length === 1 ? partyRows[0] : undefined; if (!aRow) { for (const field of FIELDS) { const target = bCell(bSheet, bRow, field); if (usable(target)) { color(target, COLORS.missing); yellow += 1; } } continue; } used.add(aRow); for (const field of FIELDS) { const target = bCell(bSheet, bRow, field); if (!usable(target)) continue; const source = aSheet[address(field.a, aRow)]; if (!usable(source)) { color(target, COLORS.missing); yellow += 1; } else if (!same(source, target, field.type)) { color(target, COLORS.different); red += 1; } } } return { data: XLSX.write(bBook, { type: "array", bookType: "xlsx", cellStyles: true }), yellow, red }; }
-function compareByTaxType(aBytes, bBytes) {
-  const aBook = XLSX.read(aBytes, { type: "array", cellStyles: true, cellDates: true });
-  const bBook = XLSX.read(bBytes, { type: "array", cellStyles: true, cellDates: true });
-  const aSheet = aBook.Sheets[aBook.SheetNames[0]]; const bSheet = bBook.Sheets[bBook.SheetNames[0]];
-  const aRows = rowsWithData(aSheet, 3, XLSX.utils.decode_range(aSheet["!ref"] || "A1:A1").e.r + 1, ["A", "C", "D", "E", "F", "K", "L"]);
-  const bRows = rowsWithData(bSheet, 7, XLSX.utils.decode_range(bSheet["!ref"] || "A1:A1").e.r + 1, ["C", "E", "G", "P", "Q", "AA", "AE"]);
-  const exact = { exempt: new Map(), disallowed: new Map(), standard: new Map() }; const standardPartyDate = new Map();
-  for (const row of aRows) { const mode = taxMode(aSheet[address("C", row)]); add(exact[mode], keyA(aSheet, row, mode), row); if (mode === "standard") add(standardPartyDate, partyDateA(aSheet, row), row); }
-  const used = new Set(); let yellow = 0; let red = 0;
-  for (const bRow of bRows) {
-    const candidates = [];
-    for (const mode of ["exempt", "disallowed", "standard"]) for (const row of (exact[mode].get(keyB(bSheet, bRow, mode)) || [])) if (!used.has(row) && !candidates.includes(row)) candidates.push(row);
-    for (const row of (standardPartyDate.get(partyDateB(bSheet, bRow)) || [])) if (!used.has(row) && !candidates.includes(row)) candidates.push(row);
-    const aRow = candidates.length === 1 ? candidates[0] : undefined;
-    if (!aRow) { for (const field of FIELDS) { const target = bCell(bSheet, bRow, field); if (usable(target)) { color(target, COLORS.missing); yellow += 1; } } continue; }
-    used.add(aRow);
-    for (const field of FIELDS) { const target = bCell(bSheet, bRow, field); if (!usable(target)) continue; const source = aSheet[address(field.a, aRow)]; if (!usable(source)) { color(target, COLORS.missing); yellow += 1; } else if (!same(source, target, field.type)) { color(target, COLORS.different); red += 1; } }
+const headerKey = (value) => value.toString().replace(/[\s(){}\[\]·ㆍ._\-/:]/g, "").toLowerCase();
+const address = (column, row) => `${column}${row}`;
+const cellAt = (sheet, column, row) => sheet[address(column, row)];
+
+function findHeaderRow(sheet, definitions) {
+  const range = XLSX.utils.decode_range(sheet["!ref"] || "A1:A1");
+  const aliases = Object.fromEntries(Object.entries(definitions).map(([key, values]) => [key, values.map(headerKey)]));
+  const maxRow = Math.min(range.e.r + 1, 40);
+  for (let row = 1; row <= maxRow; row += 1) {
+    const columns = {};
+    for (let columnIndex = 0; columnIndex <= range.e.c; columnIndex += 1) {
+      const column = XLSX.utils.encode_col(columnIndex);
+      const value = headerKey(text(cellAt(sheet, column, row)));
+      for (const [key, names] of Object.entries(aliases)) {
+        if (!columns[key] && names.includes(value)) columns[key] = column;
+      }
+    }
+    if (Object.keys(columns).length === Object.keys(definitions).length) return { row, columns };
   }
-  return { data: XLSX.write(bBook, { type: "array", bookType: "xlsx", cellStyles: true }), yellow, red };
+  return null;
 }
+
+function findWorksheet(book, definitions, fileName) {
+  for (const name of book.SheetNames) {
+    const sheet = book.Sheets[name];
+    const header = findHeaderRow(sheet, definitions);
+    if (header) return { sheet, name, ...header };
+  }
+  throw new Error(`${fileName}에서 필요한 헤더를 찾지 못했습니다. 지원 헤더명을 확인해 주세요.`);
+}
+
+function rowsWithData(sheet, firstRow, lastRow, columns) {
+  const rows = [];
+  for (let row = firstRow; row <= lastRow; row += 1) {
+    if (columns.some((column) => usable(cellAt(sheet, column, row)))) rows.push(row);
+  }
+  return rows;
+}
+
+const sameNumber = (a, b) => {
+  const left = numeric(a); const right = numeric(b);
+  return left !== null && right !== null && Math.abs(left - right) < 0.000001;
+};
+const taxMode = (cell) => headerKey(text(cell)).includes("불공") ? "disallowed" : "normal";
+
+function color(cell, rgb) {
+  cell.s = { ...(cell.s ?? {}), fill: { patternType: "solid", fgColor: { rgb } } };
+}
+
+function add(map, key, row) {
+  map.set(key, [...(map.get(key) ?? []), row]);
+}
+
+function isExactMatch(aSheet, aColumns, aRow, bSheet, bColumns, bRow) {
+  if (!sameNumber(cellAt(aSheet, aColumns.supply, aRow), cellAt(bSheet, bColumns.supply, bRow))) return false;
+  if (taxMode(cellAt(aSheet, aColumns.taxType, aRow)) !== "disallowed") return true;
+  return sameNumber(cellAt(aSheet, aColumns.tax, aRow), cellAt(bSheet, bColumns.tax, bRow));
+}
+
+function differenceCost(aSheet, aColumns, aRow, bSheet, bColumns, bRow) {
+  const aSupply = numeric(cellAt(aSheet, aColumns.supply, aRow));
+  const bSupply = numeric(cellAt(bSheet, bColumns.supply, bRow));
+  let cost = aSupply === null || bSupply === null ? Number.MAX_SAFE_INTEGER : Math.abs(aSupply - bSupply);
+  if (taxMode(cellAt(aSheet, aColumns.taxType, aRow)) === "disallowed") {
+    const aTax = numeric(cellAt(aSheet, aColumns.tax, aRow));
+    const bTax = numeric(cellAt(bSheet, bColumns.tax, bRow));
+    cost += aTax === null || bTax === null ? Number.MAX_SAFE_INTEGER : Math.abs(aTax - bTax);
+  }
+  return cost;
+}
+
 function compareByBusinessGroups(aBytes, bBytes) {
   const aBook = XLSX.read(aBytes, { type: "array", cellStyles: true, cellDates: true });
   const bBook = XLSX.read(bBytes, { type: "array", cellStyles: true, cellDates: true });
-  const aSheet = aBook.Sheets[aBook.SheetNames[0]]; const bSheet = bBook.Sheets[bBook.SheetNames[0]];
-  const aRows = rowsWithData(aSheet, 3, XLSX.utils.decode_range(aSheet["!ref"] || "A1:A1").e.r + 1, ["A", "C", "D", "E", "F", "K", "L"]);
-  const bRows = rowsWithData(bSheet, 7, XLSX.utils.decode_range(bSheet["!ref"] || "A1:A1").e.r + 1, ["C", "E", "G", "P", "Q", "AA", "AE"]);
+  const a = findWorksheet(aBook, A_HEADERS, "A 매입매출장");
+  const b = findWorksheet(bBook, B_HEADERS, "B 전자세금계산서");
+  const aLastRow = XLSX.utils.decode_range(a.sheet["!ref"] || "A1:A1").e.r + 1;
+  const bLastRow = XLSX.utils.decode_range(b.sheet["!ref"] || "A1:A1").e.r + 1;
+  const aRows = rowsWithData(a.sheet, a.row + 1, aLastRow, [a.columns.business, a.columns.supply]);
+  const bRows = rowsWithData(b.sheet, b.row + 1, bLastRow, [b.columns.business, b.columns.supply]);
   const aGroups = new Map(); const bGroups = new Map();
-  for (const row of aRows) { const businessNumber = digits(aSheet[address("E", row)]); if (businessNumber) add(aGroups, businessNumber, row); }
-  let yellow = 0; let red = 0; let countMismatch = 0;
-  const paintBRow = (row) => { for (const field of FIELDS) { const target = bCell(bSheet, row, field); if (usable(target)) { color(target, COLORS.missing); red += 1; } } };
-  for (const row of bRows) { const businessNumber = digits(bSheet[address("E", row)]); if (businessNumber) add(bGroups, businessNumber, row); else paintBRow(row); }
-  for (const [businessNumber, bBusinessRows] of bGroups) {
-    const aBusinessRows = aGroups.get(businessNumber) || [];
-    const hasCountMismatch = aBusinessRows.length !== bBusinessRows.length;
-    if (hasCountMismatch) countMismatch += 1;
-    // 사업자번호 그룹 안에서는 행 순서대로 1:1 대응합니다.
-    // 공급가액·세액·날짜는 대응 행을 찾는 키로 사용하지 않습니다.
-    bBusinessRows.forEach((bRow, index) => {
-      const aRow = aBusinessRows[index];
-      if (aRow === undefined) { paintBRow(bRow); return; }
-      for (const field of FIELDS) {
-        const target = bCell(bSheet, bRow, field);
-        if (!usable(target)) continue;
-        const source = aSheet[address(field.a, aRow)];
-        if (!usable(source)) { color(target, COLORS.missing); red += 1; }
-        else if (!same(source, target, field.type)) { color(target, COLORS.different); yellow += 1; }
-      }
-    });
+  let blankA = 0; let blankB = 0;
+  for (const row of aRows) {
+    const businessNumber = digits(cellAt(a.sheet, a.columns.business, row));
+    if (businessNumber) add(aGroups, businessNumber, row); else blankA += 1;
   }
-  return { data: XLSX.write(bBook, { type: "array", bookType: "xlsx", cellStyles: true }), yellow, red, countMismatch };
+  for (const row of bRows) {
+    const businessNumber = digits(cellAt(b.sheet, b.columns.business, row));
+    if (businessNumber) add(bGroups, businessNumber, row); else blankB += 1;
+  }
+
+  let yellow = 0; let red = 0; let countMismatch = 0; let aOnlyRows = blankA; let bOnlyRows = blankB;
+  const paintMissingBRow = (row) => {
+    for (const key of ["business", "supply", "tax"]) {
+      const target = cellAt(b.sheet, b.columns[key], row);
+      if (usable(target)) { color(target, COLORS.missing); red += 1; }
+    }
+  };
+  for (const row of bRows) if (!digits(cellAt(b.sheet, b.columns.business, row))) paintMissingBRow(row);
+
+  const businessNumbers = new Set([...aGroups.keys(), ...bGroups.keys()]);
+  for (const businessNumber of businessNumbers) {
+    const aBusinessRows = aGroups.get(businessNumber) ?? [];
+    const bBusinessRows = bGroups.get(businessNumber) ?? [];
+    if (aBusinessRows.length !== bBusinessRows.length) countMismatch += 1;
+    if (aBusinessRows.length > bBusinessRows.length) aOnlyRows += aBusinessRows.length - bBusinessRows.length;
+    if (bBusinessRows.length > aBusinessRows.length) bOnlyRows += bBusinessRows.length - aBusinessRows.length;
+
+    // 사업자번호 그룹 안에서는 공급가액(불공은 공급가액+세액)으로 대응 행을 찾습니다.
+    // 두 파일의 행 순서는 비교에 사용하지 않습니다.
+    const unusedA = new Set(aBusinessRows);
+    const pairs = new Map();
+    for (const bRow of bBusinessRows) {
+      const exactA = [...unusedA].find((aRow) => isExactMatch(a.sheet, a.columns, aRow, b.sheet, b.columns, bRow));
+      if (exactA !== undefined) { pairs.set(bRow, exactA); unusedA.delete(exactA); }
+    }
+    for (const bRow of bBusinessRows) {
+      if (pairs.has(bRow)) continue;
+      const nearestA = [...unusedA].sort((left, right) => differenceCost(a.sheet, a.columns, left, b.sheet, b.columns, bRow) - differenceCost(a.sheet, a.columns, right, b.sheet, b.columns, bRow))[0];
+      if (nearestA === undefined) { paintMissingBRow(bRow); continue; }
+      pairs.set(bRow, nearestA); unusedA.delete(nearestA);
+    }
+    for (const [bRow, aRow] of pairs) {
+      const aSupply = cellAt(a.sheet, a.columns.supply, aRow);
+      const bSupply = cellAt(b.sheet, b.columns.supply, bRow);
+      if (!usable(aSupply)) { color(bSupply, COLORS.missing); red += 1; }
+      else if (!sameNumber(aSupply, bSupply)) { color(bSupply, COLORS.different); yellow += 1; }
+
+      if (taxMode(cellAt(a.sheet, a.columns.taxType, aRow)) === "disallowed") {
+        const aTax = cellAt(a.sheet, a.columns.tax, aRow);
+        const bTax = cellAt(b.sheet, b.columns.tax, bRow);
+        if (!usable(aTax)) { color(bTax, COLORS.missing); red += 1; }
+        else if (!sameNumber(aTax, bTax)) { color(bTax, COLORS.different); yellow += 1; }
+      }
+    }
+  }
+  return {
+    data: XLSX.write(bBook, { type: "array", bookType: "xlsx", cellStyles: true }),
+    yellow, red, countMismatch, aOnlyRows, bOnlyRows, aSheetName: a.name, bSheetName: b.name,
+  };
 }
-const form = document.querySelector("#compare-form"); const status = document.querySelector("#status"); const button = form.querySelector("button");
-form.addEventListener("submit", async (event) => { event.preventDefault(); button.disabled = true; status.textContent = "이 브라우저 안에서 엑셀을 비교하는 중입니다…"; try { const a = form.elements.aFile.files[0]; const b = form.elements.bFile.files[0]; const result = compareByBusinessGroups(new Uint8Array(await a.arrayBuffer()), new Uint8Array(await b.arrayBuffer())); const link = document.createElement("a"); link.href = URL.createObjectURL(new Blob([result.data], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" })); link.download = "B_색상표시_비교결과.xlsx"; link.click(); setTimeout(() => URL.revokeObjectURL(link.href), 0); status.textContent = `완료: 노랑 ${result.yellow}셀 · 빨강 ${result.red}셀 · 사업자별 행 수 차이 ${result.countMismatch}개`; } catch (error) { status.textContent = `처리 오류: ${error.message}`; } finally { button.disabled = false; } });
+
+const form = document.querySelector("#compare-form");
+const status = document.querySelector("#status");
+const button = form.querySelector("button");
+form.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  button.disabled = true;
+  status.textContent = "이 브라우저 안에서 엑셀 헤더와 사업자번호를 확인하는 중입니다…";
+  try {
+    const aFile = form.elements.aFile.files[0]; const bFile = form.elements.bFile.files[0];
+    const result = compareByBusinessGroups(new Uint8Array(await aFile.arrayBuffer()), new Uint8Array(await bFile.arrayBuffer()));
+    const link = document.createElement("a");
+    link.href = URL.createObjectURL(new Blob([result.data], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" }));
+    link.download = "B_색상표시_비교결과.xlsx";
+    link.click();
+    setTimeout(() => URL.revokeObjectURL(link.href), 0);
+    status.textContent = `완료: 노랑 ${result.yellow}셀 · 빨강 ${result.red}셀 · 사업자별 행 수 차이 ${result.countMismatch}개 · A에만 ${result.aOnlyRows}행 · B에만 ${result.bOnlyRows}행`;
+  } catch (error) {
+    status.textContent = `처리 오류: ${error.message}`;
+  } finally {
+    button.disabled = false;
+  }
+});
