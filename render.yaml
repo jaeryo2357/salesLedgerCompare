@@ -2,7 +2,9 @@ services:
   - type: web
     runtime: static
     name: excel-purchase-comparer
-    buildCommand: ""
+    # 브라우저에서 동작하는 정적 사이트라 별도 컴파일은 없지만,
+    # Render가 빈 빌드로 판단하지 않도록 성공하는 no-op 명령을 사용합니다.
+    buildCommand: "echo 'Static site: no build step required'"
     staticPublishPath: ./public
     headers:
       - path: /*
