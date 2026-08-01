@@ -1,13 +1,17 @@
 /* global XLSX */
-const FIELDS = [{ a: "A", b: "C", type: "date" }, { a: "D", b: "G", type: "text" }, { a: "E", b: "E", type: "text" }, { a: "F", b: "AA", fallbackB: "Y", type: "text" }, { a: "G", b: "AC", type: "number" }, { a: "H", b: "AD", type: "number" }, { a: "K", b: "P", fallbackB: "AE", type: "number" }, { a: "L", b: "Q", fallbackB: "AF", type: "number" }];
-const COLORS = { missing: "FFF2CC", different: "F4CCCC" };
+const FIELDS = [{ a: "A", b: "C", type: "date" }, { a: "D", b: "G", type: "text" }, { a: "E", b: "E", type: "business" }, { a: "F", b: "AA", type: "text" }, { a: "G", b: "AC", type: "number" }, { a: "H", b: "AD", type: "number" }, { a: "K", b: "P", fallbackB: "AE", type: "number" }, { a: "L", b: "Q", fallbackB: "AF", type: "number" }];
+// 노랑은 값 불일치, 빨강은 B에 대응하는 A 행/값이 없는 경우에만 사용합니다.
+const COLORS = { missing: "F4CCCC", different: "FFF2CC" };
 const text = (cell) => (cell?.w ?? cell?.v ?? "").toString().trim();
 const usable = (cell) => text(cell) !== "";
 const digits = (cell) => text(cell).replace(/[^0-9A-Za-z]/g, "").toUpperCase();
 const numeric = (cell) => { const n = Number(text(cell).replace(/,/g, "").replace(/[^0-9.-]/g, "")); return Number.isFinite(n) ? n : null; };
 const dateKey = (cell) => { const m = text(cell).match(/(\d{4})\D?(\d{1,2})\D?(\d{1,2})/); return m ? `${m[1]}${m[2].padStart(2, "0")}${m[3].padStart(2, "0")}` : digits(cell); };
 const address = (column, row) => `${column}${row}`;
-const bCell = (sheet, row, field) => sheet[address(field.b, row)] ?? (field.fallbackB ? sheet[address(field.fallbackB, row)] : undefined);
+const bCell = (sheet, row, field) => {
+  const primary = sheet[address(field.b, row)];
+  return usable(primary) || !field.fallbackB ? primary : sheet[address(field.fallbackB, row)];
+};
 function rowsWithData(sheet, firstRow, lastRow, columns) { const rows = []; for (let r = firstRow; r <= lastRow; r += 1) if (columns.some((c) => usable(sheet[address(c, r)]))) rows.push(r); return rows; }
 const taxMode = (cell) => { const value = text(cell).replace(/\s+/g, "").toLowerCase(); return value.includes("면세") ? "exempt" : value.includes("불공") ? "disallowed" : "standard"; };
 function keyA(s, r, mode) {
@@ -24,7 +28,7 @@ function keyB(s, r, mode) {
 }
 function partyDateA(s, r) { return [digits(s[address("E", r)]), dateKey(s[address("A", r)])].join("|"); }
 function partyDateB(s, r) { return [digits(s[address("E", r)]), dateKey(s[address("C", r)])].join("|"); }
-function same(a, b, type) { if (type === "number") { const x = numeric(a); const y = numeric(b); return x !== null && y !== null && Math.abs(x - y) < .000001; } return type === "date" ? dateKey(a) === dateKey(b) : text(a).replace(/\s+/g, " ").toUpperCase() === text(b).replace(/\s+/g, " ").toUpperCase(); }
+function same(a, b, type) { if (type === "number") { const x = numeric(a); const y = numeric(b); return x !== null && y !== null && Math.abs(x - y) < .000001; } if (type === "business") return digits(a) === digits(b); return type === "date" ? dateKey(a) === dateKey(b) : text(a).replace(/\s+/g, " ").toUpperCase() === text(b).replace(/\s+/g, " ").toUpperCase(); }
 function color(cell, rgb) { cell.s = { ...(cell.s ?? {}), fill: { patternType: "solid", fgColor: { rgb } } }; }
 function add(map, key, row) { map.set(key, [...(map.get(key) ?? []), row]); }
 function compare(aBytes, bBytes) { const aBook = XLSX.read(aBytes, { type: "array", cellStyles: true, cellDates: true }); const bBook = XLSX.read(bBytes, { type: "array", cellStyles: true, cellDates: true }); const aSheet = aBook.Sheets[aBook.SheetNames[0]]; const bSheet = bBook.Sheets[bBook.SheetNames[0]]; const aRows = rowsWithData(aSheet, 3, XLSX.utils.decode_range(aSheet["!ref"] || "A1:A1").e.r + 1, ["A", "D", "E", "F", "K", "L"]); const bRows = rowsWithData(bSheet, 7, XLSX.utils.decode_range(bSheet["!ref"] || "A1:A1").e.r + 1, ["C", "E", "G", "P", "Q", "AA", "AE"]); const exact = new Map(); const party = new Map(); for (const row of aRows) { add(exact, keyA(aSheet, row), row); add(party, partyDateA(aSheet, row), row); } const used = new Set(); let yellow = 0; let red = 0; for (const bRow of bRows) { const exactRows = (exact.get(keyB(bSheet, bRow)) || []).filter((r) => !used.has(r)); const partyRows = (party.get(partyDateB(bSheet, bRow)) || []).filter((r) => !used.has(r)); const aRow = exactRows.length === 1 ? exactRows[0] : partyRows.length === 1 ? partyRows[0] : undefined; if (!aRow) { for (const field of FIELDS) { const target = bCell(bSheet, bRow, field); if (usable(target)) { color(target, COLORS.missing); yellow += 1; } } continue; } used.add(aRow); for (const field of FIELDS) { const target = bCell(bSheet, bRow, field); if (!usable(target)) continue; const source = aSheet[address(field.a, aRow)]; if (!usable(source)) { color(target, COLORS.missing); yellow += 1; } else if (!same(source, target, field.type)) { color(target, COLORS.different); red += 1; } } } return { data: XLSX.write(bBook, { type: "array", bookType: "xlsx", cellStyles: true }), yellow, red }; }
@@ -56,26 +60,26 @@ function compareByBusinessGroups(aBytes, bBytes) {
   const bRows = rowsWithData(bSheet, 7, XLSX.utils.decode_range(bSheet["!ref"] || "A1:A1").e.r + 1, ["C", "E", "G", "P", "Q", "AA", "AE"]);
   const aGroups = new Map(); const bGroups = new Map();
   for (const row of aRows) { const businessNumber = digits(aSheet[address("E", row)]); if (businessNumber) add(aGroups, businessNumber, row); }
-  const used = new Set(); let yellow = 0; let red = 0; let countMismatch = 0;
-  const paintBRow = (row) => { for (const field of FIELDS) { const target = bCell(bSheet, row, field); if (usable(target)) { color(target, COLORS.missing); yellow += 1; } } };
+  let yellow = 0; let red = 0; let countMismatch = 0;
+  const paintBRow = (row) => { for (const field of FIELDS) { const target = bCell(bSheet, row, field); if (usable(target)) { color(target, COLORS.missing); red += 1; } } };
   for (const row of bRows) { const businessNumber = digits(bSheet[address("E", row)]); if (businessNumber) add(bGroups, businessNumber, row); else paintBRow(row); }
   for (const [businessNumber, bBusinessRows] of bGroups) {
     const aBusinessRows = aGroups.get(businessNumber) || [];
     const hasCountMismatch = aBusinessRows.length !== bBusinessRows.length;
     if (hasCountMismatch) countMismatch += 1;
-    for (const bRow of bBusinessRows) {
-      if (hasCountMismatch) color(bSheet[address("E", bRow)], COLORS.missing);
-      const candidates = [];
-      for (const aRow of aBusinessRows) {
-        if (used.has(aRow)) continue;
-        const mode = taxMode(aSheet[address("C", aRow)]);
-        if (keyA(aSheet, aRow, mode) === keyB(bSheet, bRow, mode)) candidates.push(aRow);
+    // 사업자번호 그룹 안에서는 행 순서대로 1:1 대응합니다.
+    // 공급가액·세액·날짜는 대응 행을 찾는 키로 사용하지 않습니다.
+    bBusinessRows.forEach((bRow, index) => {
+      const aRow = aBusinessRows[index];
+      if (aRow === undefined) { paintBRow(bRow); return; }
+      for (const field of FIELDS) {
+        const target = bCell(bSheet, bRow, field);
+        if (!usable(target)) continue;
+        const source = aSheet[address(field.a, aRow)];
+        if (!usable(source)) { color(target, COLORS.missing); red += 1; }
+        else if (!same(source, target, field.type)) { color(target, COLORS.different); yellow += 1; }
       }
-      const aRow = candidates.length === 1 ? candidates[0] : undefined;
-      if (!aRow) { paintBRow(bRow); continue; }
-      used.add(aRow);
-      for (const field of FIELDS) { const target = bCell(bSheet, bRow, field); if (!usable(target)) continue; const source = aSheet[address(field.a, aRow)]; if (!usable(source)) { color(target, COLORS.missing); yellow += 1; } else if (!same(source, target, field.type)) { color(target, COLORS.different); red += 1; } }
-    }
+    });
   }
   return { data: XLSX.write(bBook, { type: "array", bookType: "xlsx", cellStyles: true }), yellow, red, countMismatch };
 }
