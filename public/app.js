@@ -65,7 +65,12 @@ const sameNumber = (a, b) => {
   const left = numeric(a); const right = numeric(b);
   return left !== null && right !== null && Math.abs(left - right) < 0.000001;
 };
-const taxMode = (cell) => headerKey(text(cell)).includes("불공") ? "disallowed" : "normal";
+const taxMode = (cell) => {
+  const value = headerKey(text(cell));
+  if (value.includes("불공")) return "disallowed";
+  if (value.includes("면세")) return "exempt";
+  return "normal";
+};
 
 function color(cell, rgb) {
   cell.s = { ...(cell.s ?? {}), fill: { patternType: "solid", fgColor: { rgb } } };
