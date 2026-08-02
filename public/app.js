@@ -35,7 +35,7 @@ function headerTextAt(sheet, columnIndex, row) {
   return merge ? text(sheet[XLSX.utils.encode_cell(merge.s)]) : "";
 }
 
-function findHeaderRow(sheet, definitions) {
+function findHeaderRow(sheet, definitions, requiredKeys = Object.keys(definitions)) {
   const range = XLSX.utils.decode_range(sheet["!ref"] || "A1:A1");
   const aliases = Object.fromEntries(Object.entries(definitions).map(([key, values]) => [key, values.map(headerKey)]));
   const maxRow = Math.min(range.e.r + 1, 40);
@@ -52,15 +52,15 @@ function findHeaderRow(sheet, definitions) {
         if (!columns[key] && values.some((value) => names.includes(value))) columns[key] = column;
       }
     }
-    if (Object.keys(columns).length === Object.keys(definitions).length) return { row, columns };
+    if (requiredKeys.every((key) => columns[key])) return { row, columns };
   }
   return null;
 }
 
-function findWorksheet(book, definitions, fileName) {
+function findWorksheet(book, definitions, fileName, requiredKeys) {
   for (const name of book.SheetNames) {
     const sheet = book.Sheets[name];
-    const header = findHeaderRow(sheet, definitions);
+    const header = findHeaderRow(sheet, definitions, requiredKeys);
     if (header) return { sheet, name, ...header };
   }
   throw new Error(`${fileName}에서 필요한 헤더를 찾지 못했습니다. 지원 헤더명을 확인해 주세요.`);
@@ -95,7 +95,7 @@ function add(map, key, row) {
 
 function isExactMatch(aSheet, aColumns, aRow, bSheet, bColumns, bRow) {
   if (!sameNumber(cellAt(aSheet, aColumns.supply, aRow), cellAt(bSheet, bColumns.supply, bRow))) return false;
-  if (taxMode(cellAt(aSheet, aColumns.taxType, aRow)) !== "disallowed") return true;
+  if (taxMode(cellAt(aSheet, aColumns.taxType, aRow)) !== "disallowed" || !bColumns.tax) return true;
   return sameNumber(cellAt(aSheet, aColumns.tax, aRow), cellAt(bSheet, bColumns.tax, bRow));
 }
 
@@ -103,7 +103,7 @@ function differenceCost(aSheet, aColumns, aRow, bSheet, bColumns, bRow) {
   const aSupply = numeric(cellAt(aSheet, aColumns.supply, aRow));
   const bSupply = numeric(cellAt(bSheet, bColumns.supply, bRow));
   let cost = aSupply === null || bSupply === null ? Number.MAX_SAFE_INTEGER : Math.abs(aSupply - bSupply);
-  if (taxMode(cellAt(aSheet, aColumns.taxType, aRow)) === "disallowed") {
+  if (taxMode(cellAt(aSheet, aColumns.taxType, aRow)) === "disallowed" && bColumns.tax) {
     const aTax = numeric(cellAt(aSheet, aColumns.tax, aRow));
     const bTax = numeric(cellAt(bSheet, bColumns.tax, bRow));
     cost += aTax === null || bTax === null ? Number.MAX_SAFE_INTEGER : Math.abs(aTax - bTax);
@@ -115,7 +115,7 @@ function compareByBusinessGroups(aBytes, bBytes) {
   const aBook = XLSX.read(aBytes, { type: "array", cellStyles: true, cellDates: true });
   const bBook = XLSX.read(bBytes, { type: "array", cellStyles: true, cellDates: true });
   const a = findWorksheet(aBook, A_HEADERS, "A 매입매출장");
-  const b = findWorksheet(bBook, B_HEADERS, "B 전자세금계산서");
+  const b = findWorksheet(bBook, B_HEADERS, "B 전자세금계산서", ["business", "supply"]);
   const aLastRow = XLSX.utils.decode_range(a.sheet["!ref"] || "A1:A1").e.r + 1;
   const bLastRow = XLSX.utils.decode_range(b.sheet["!ref"] || "A1:A1").e.r + 1;
   const aRows = rowsWithData(a.sheet, a.row + 1, aLastRow, [a.columns.business, a.columns.supply]);
@@ -133,7 +133,7 @@ function compareByBusinessGroups(aBytes, bBytes) {
 
   let yellow = 0; let red = 0; let countMismatch = 0; let aOnlyRows = blankA; let bOnlyRows = blankB;
   const paintMissingBRow = (row) => {
-    for (const key of ["business", "supply", "tax"]) {
+    for (const key of ["business", "supply", "tax"].filter((key) => b.columns[key])) {
       const target = cellAt(b.sheet, b.columns[key], row);
       if (usable(target)) { color(target, COLORS.missing); red += 1; }
     }
@@ -168,7 +168,7 @@ function compareByBusinessGroups(aBytes, bBytes) {
       if (!usable(aSupply)) { color(bSupply, COLORS.missing); red += 1; }
       else if (!sameNumber(aSupply, bSupply)) { color(bSupply, COLORS.different); yellow += 1; }
 
-      if (taxMode(cellAt(a.sheet, a.columns.taxType, aRow)) === "disallowed") {
+      if (taxMode(cellAt(a.sheet, a.columns.taxType, aRow)) === "disallowed" && b.columns.tax) {
         const aTax = cellAt(a.sheet, a.columns.tax, aRow);
         const bTax = cellAt(b.sheet, b.columns.tax, bRow);
         if (!usable(aTax)) { color(bTax, COLORS.missing); red += 1; }
