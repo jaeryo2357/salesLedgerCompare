@@ -138,7 +138,9 @@ function compareByBusinessGroups(aBytes, bBytes) {
   }
 
   let yellow = 0; let red = 0; let countMismatch = 0; let aOnlyRows = blankA; let bOnlyRows = blankB;
+  let matchedRows = 0; let supplyDifferences = 0; let taxDifferences = 0; let unmatchedBRows = 0; let documentTypeMismatches = 0;
   const paintMissingBRow = (row) => {
+    unmatchedBRows += 1;
     for (const key of ["business", "supply", "tax"].filter((key) => b.columns[key])) {
       const target = cellAt(b.sheet, b.columns[key], row);
       if (usable(target)) { color(target, COLORS.missing); red += 1; }
@@ -166,35 +168,78 @@ function compareByBusinessGroups(aBytes, bBytes) {
       if (pairs.has(bRow)) continue;
       const compatibleA = [...unusedA].filter((aRow) => isDocumentTypeCompatible(a.sheet, a.columns, aRow, b.columns));
       const nearestA = compatibleA.sort((left, right) => differenceCost(a.sheet, a.columns, left, b.sheet, b.columns, bRow) - differenceCost(a.sheet, a.columns, right, b.sheet, b.columns, bRow))[0];
-      if (nearestA === undefined) { paintMissingBRow(bRow); continue; }
+      if (nearestA === undefined) {
+        if (aBusinessRows.length > 0 && !aBusinessRows.some((aRow) => isDocumentTypeCompatible(a.sheet, a.columns, aRow, b.columns))) documentTypeMismatches += 1;
+        paintMissingBRow(bRow); continue;
+      }
       pairs.set(bRow, nearestA); unusedA.delete(nearestA);
     }
     for (const [bRow, aRow] of pairs) {
       const aSupply = cellAt(a.sheet, a.columns.supply, aRow);
       const bSupply = cellAt(b.sheet, b.columns.supply, bRow);
       if (!usable(aSupply)) { color(bSupply, COLORS.missing); red += 1; }
-      else if (!sameNumber(aSupply, bSupply)) { color(bSupply, COLORS.different); yellow += 1; }
+      else if (!sameNumber(aSupply, bSupply)) { color(bSupply, COLORS.different); yellow += 1; supplyDifferences += 1; }
 
       if (taxMode(cellAt(a.sheet, a.columns.taxType, aRow)) === "disallowed" && b.columns.tax) {
         const aTax = cellAt(a.sheet, a.columns.tax, aRow);
         const bTax = cellAt(b.sheet, b.columns.tax, bRow);
         if (!usable(aTax)) { color(bTax, COLORS.missing); red += 1; }
-        else if (!sameNumber(aTax, bTax)) { color(bTax, COLORS.different); yellow += 1; }
+        else if (!sameNumber(aTax, bTax)) { color(bTax, COLORS.different); yellow += 1; taxDifferences += 1; }
       }
     }
+    matchedRows += pairs.size;
   }
   return {
     data: XLSX.write(bBook, { type: "array", bookType: "xlsx", cellStyles: true }),
-    yellow, red, countMismatch, aOnlyRows, bOnlyRows, aSheetName: a.name, bSheetName: b.name,
+    yellow, red, countMismatch, aOnlyRows, bOnlyRows, matchedRows, supplyDifferences, taxDifferences, unmatchedBRows, documentTypeMismatches,
+    aRowCount: aRows.length, bRowCount: bRows.length, bHasTax: Boolean(b.columns.tax), aSheetName: a.name, bSheetName: b.name,
   };
 }
 
 const form = document.querySelector("#compare-form");
 const status = document.querySelector("#status");
 const button = form.querySelector("button");
+const summary = document.querySelector("#summary");
+const summaryTitle = document.querySelector("#summary-title");
+const summaryDescription = document.querySelector("#summary-description");
+const summaryCards = document.querySelector("#summary-cards");
+const summaryNotes = document.querySelector("#summary-notes");
+function summaryCard(label, value, tone = "") {
+  const card = document.createElement("div"); card.className = `summary-card ${tone}`;
+  const labelElement = document.createElement("span"); labelElement.textContent = label;
+  const valueElement = document.createElement("strong"); valueElement.textContent = value;
+  card.append(labelElement, valueElement); return card;
+}
+function summaryNote(textValue, tone = "") {
+  const note = document.createElement("li"); note.className = tone; note.textContent = textValue; return note;
+}
+function renderSummary(result) {
+  const hasIssues = result.yellow > 0 || result.red > 0;
+  summary.hidden = false;
+  summaryTitle.textContent = hasIssues ? "비교 결과를 확인해 주세요" : "모든 비교가 정상 완료됐어요";
+  summaryDescription.textContent = `${result.aSheetName} ↔ ${result.bSheetName} · B 문서 유형: ${result.bHasTax ? "전자세금계산서" : "전자계산서(면세)"}`;
+  summaryCards.replaceChildren(
+    summaryCard("읽은 행", `A ${result.aRowCount} · B ${result.bRowCount}`),
+    summaryCard("A와 대응된 행", `${result.matchedRows}행`, result.matchedRows === result.bRowCount ? "success" : ""),
+    summaryCard("공급가액 차이", `${result.supplyDifferences}건`, result.supplyDifferences ? "warning" : ""),
+    summaryCard("세액 차이", result.bHasTax ? `${result.taxDifferences}건` : "해당 없음", result.taxDifferences ? "warning" : ""),
+    summaryCard("대응 불가 B행", `${result.unmatchedBRows}행`, result.unmatchedBRows ? "danger" : ""),
+    summaryCard("A 단독 행", `${result.aOnlyRows}행`, result.aOnlyRows ? "danger" : ""),
+  );
+  const notes = [];
+  if (result.supplyDifferences) notes.push(summaryNote(`공급가액이 다른 행이 ${result.supplyDifferences}건 있어 B의 공급가액 셀을 노랑으로 표시했습니다.`, "warning"));
+  if (result.taxDifferences) notes.push(summaryNote(`불공 행 중 세액이 다른 행이 ${result.taxDifferences}건 있어 B의 세액 셀을 노랑으로 표시했습니다.`, "warning"));
+  if (result.documentTypeMismatches) notes.push(summaryNote(`같은 사업자번호지만 면세/세금계산서 문서 유형이 맞지 않는 B 행이 ${result.documentTypeMismatches}건 있어 빨강으로 표시했습니다.`, "danger"));
+  if (result.unmatchedBRows > result.documentTypeMismatches) notes.push(summaryNote(`A에서 대응 행을 찾지 못한 B 행이 ${result.unmatchedBRows - result.documentTypeMismatches}건 있어 빨강으로 표시했습니다.`, "danger"));
+  if (result.countMismatch) notes.push(summaryNote(`사업자번호별 행 수가 다른 그룹이 ${result.countMismatch}개입니다.`, "danger"));
+  if (result.aOnlyRows) notes.push(summaryNote(`A에만 존재하는 행은 ${result.aOnlyRows}건입니다. B 결과 파일에는 대응할 셀이 없어 상태 정보로만 표시합니다.`, "danger"));
+  if (!notes.length) notes.push(summaryNote("사업자번호, 문서 유형, 공급가액 기준으로 모든 B 행이 정상 대응됐습니다."));
+  summaryNotes.replaceChildren(...notes);
+}
 form.addEventListener("submit", async (event) => {
   event.preventDefault();
   button.disabled = true;
+  summary.hidden = true;
   status.textContent = "이 브라우저 안에서 엑셀 헤더와 사업자번호를 확인하는 중입니다…";
   try {
     const aFile = form.elements.aFile.files[0]; const bFile = form.elements.bFile.files[0];
@@ -204,7 +249,8 @@ form.addEventListener("submit", async (event) => {
     link.download = "B_색상표시_비교결과.xlsx";
     link.click();
     setTimeout(() => URL.revokeObjectURL(link.href), 0);
-    status.textContent = `완료: 노랑 ${result.yellow}셀 · 빨강 ${result.red}셀 · 사업자별 행 수 차이 ${result.countMismatch}개 · A에만 ${result.aOnlyRows}행 · B에만 ${result.bOnlyRows}행`;
+    status.textContent = "비교가 완료되어 결과 엑셀을 다운로드했습니다.";
+    renderSummary(result);
   } catch (error) {
     status.textContent = `처리 오류: ${error.message}`;
   } finally {
