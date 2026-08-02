@@ -93,6 +93,12 @@ function add(map, key, row) {
   map.set(key, [...(map.get(key) ?? []), row]);
 }
 
+function isDocumentTypeCompatible(aSheet, aColumns, aRow, bColumns) {
+  const aMode = taxMode(cellAt(aSheet, aColumns.taxType, aRow));
+  // B에 세액 열이 없으면 전자계산서(면세), 있으면 전자세금계산서로 처리합니다.
+  return bColumns.tax ? aMode !== "exempt" : aMode === "exempt";
+}
+
 function isExactMatch(aSheet, aColumns, aRow, bSheet, bColumns, bRow) {
   if (!sameNumber(cellAt(aSheet, aColumns.supply, aRow), cellAt(bSheet, bColumns.supply, bRow))) return false;
   if (taxMode(cellAt(aSheet, aColumns.taxType, aRow)) !== "disallowed" || !bColumns.tax) return true;
@@ -153,12 +159,13 @@ function compareByBusinessGroups(aBytes, bBytes) {
     const unusedA = new Set(aBusinessRows);
     const pairs = new Map();
     for (const bRow of bBusinessRows) {
-      const exactA = [...unusedA].find((aRow) => isExactMatch(a.sheet, a.columns, aRow, b.sheet, b.columns, bRow));
+      const exactA = [...unusedA].find((aRow) => isDocumentTypeCompatible(a.sheet, a.columns, aRow, b.columns) && isExactMatch(a.sheet, a.columns, aRow, b.sheet, b.columns, bRow));
       if (exactA !== undefined) { pairs.set(bRow, exactA); unusedA.delete(exactA); }
     }
     for (const bRow of bBusinessRows) {
       if (pairs.has(bRow)) continue;
-      const nearestA = [...unusedA].sort((left, right) => differenceCost(a.sheet, a.columns, left, b.sheet, b.columns, bRow) - differenceCost(a.sheet, a.columns, right, b.sheet, b.columns, bRow))[0];
+      const compatibleA = [...unusedA].filter((aRow) => isDocumentTypeCompatible(a.sheet, a.columns, aRow, b.columns));
+      const nearestA = compatibleA.sort((left, right) => differenceCost(a.sheet, a.columns, left, b.sheet, b.columns, bRow) - differenceCost(a.sheet, a.columns, right, b.sheet, b.columns, bRow))[0];
       if (nearestA === undefined) { paintMissingBRow(bRow); continue; }
       pairs.set(bRow, nearestA); unusedA.delete(nearestA);
     }
