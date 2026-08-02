@@ -17,6 +17,7 @@ const text = (cell) => (cell?.w ?? cell?.v ?? "").toString().trim();
 const usable = (cell) => text(cell) !== "";
 const digits = (cell) => text(cell).replace(/[^0-9A-Za-z]/g, "").toUpperCase();
 const numeric = (cell) => {
+  if (typeof cell?.v === "number" && Number.isFinite(cell.v)) return cell.v;
   const raw = text(cell);
   if (!raw) return null;
   const value = Number(raw.replace(/,/g, "").replace(/[^0-9.-]/g, ""));
