@@ -26,6 +26,14 @@ const numeric = (cell) => {
 const headerKey = (value) => value.toString().replace(/[\s(){}\[\]·ㆍ._\-/:]/g, "").toLowerCase();
 const address = (column, row) => `${column}${row}`;
 const cellAt = (sheet, column, row) => sheet[address(column, row)];
+function headerTextAt(sheet, columnIndex, row) {
+  const column = XLSX.utils.encode_col(columnIndex);
+  const direct = text(cellAt(sheet, column, row));
+  if (direct) return direct;
+  const rowIndex = row - 1;
+  const merge = (sheet["!merges"] ?? []).find((range) => range.s.r <= rowIndex && range.e.r >= rowIndex && range.s.c <= columnIndex && range.e.c >= columnIndex);
+  return merge ? text(sheet[XLSX.utils.encode_cell(merge.s)]) : "";
+}
 
 function findHeaderRow(sheet, definitions) {
   const range = XLSX.utils.decode_range(sheet["!ref"] || "A1:A1");
@@ -35,9 +43,13 @@ function findHeaderRow(sheet, definitions) {
     const columns = {};
     for (let columnIndex = 0; columnIndex <= range.e.c; columnIndex += 1) {
       const column = XLSX.utils.encode_col(columnIndex);
-      const value = headerKey(text(cellAt(sheet, column, row)));
+      const current = headerKey(headerTextAt(sheet, columnIndex, row));
+      const previous = row > 1 ? headerKey(headerTextAt(sheet, columnIndex, row - 1)) : "";
+      // 일부 매입매출장은 "매 입"과 "공급가액"처럼 헤더를 두 줄로 나눕니다.
+      // 현재 줄, 이전 줄, 두 줄을 합친 값을 모두 헤더 후보로 봅니다.
+      const values = [current, previous, `${previous}${current}`];
       for (const [key, names] of Object.entries(aliases)) {
-        if (!columns[key] && names.includes(value)) columns[key] = column;
+        if (!columns[key] && values.some((value) => names.includes(value))) columns[key] = column;
       }
     }
     if (Object.keys(columns).length === Object.keys(definitions).length) return { row, columns };
