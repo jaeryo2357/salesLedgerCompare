@@ -13,7 +13,7 @@
       <p class="intro">파일은 이 브라우저 안에서만 비교됩니다. 업로드한 엑셀 파일은 서버로 전송하거나 저장하지 않습니다.</p>
       <form id="compare-form">
         <label class="upload"><span>A · 매입매출장</span><input name="aFile" type="file" accept=".xls,.xlsx" required /><small>매입매출장 파일을 선택하세요.</small></label>
-        <label class="upload"><span>B · 전자세금계산서</span><input name="bFile" type="file" accept=".xls,.xlsx" required /><small>B의 셀 위치·값·시트는 유지되고 색만 표시됩니다.</small></label>
+        <label class="upload"><span>B · 전자세금계산서</span><input name="bFile" type="file" accept=".xls,.xlsx" required /><small>B 원본은 유지하고, 결과 파일에 파랑 표시된 A 확인 시트를 추가합니다.</small></label>
         <button type="submit">내 컴퓨터에서 비교하기</button>
       </form>
       <p id="status" role="status"></p>
@@ -22,7 +22,7 @@
         <div id="summary-cards" class="summary-cards"></div>
         <ul id="summary-notes" class="summary-notes"></ul>
       </section>
-      <section class="legend"><span><i class="yellow"></i>노랑: A와 B 값이 다름</span><span><i class="red"></i>빨강: A에 대응 값 또는 행 없음</span></section>
+      <section class="legend"><span><i class="yellow"></i>노랑: A와 B 값이 다름</span><span><i class="red"></i>빨강: B에 대응 A 행 없음</span><span><i class="blue"></i>파랑: A에 대응 B 행 없음</span></section>
       <p class="privacy">외부로 전송되는 것은 이 페이지를 열 때 필요한 프로그램 코드뿐이며, 선택한 엑셀 파일은 브라우저 밖으로 나가지 않습니다.</p>
     </main>
     <script src="https://cdn.jsdelivr.net/npm/xlsx-js-style@1.2.0/dist/cpexcel.js"></script>

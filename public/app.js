@@ -1,6 +1,6 @@
 /* global XLSX */
-// 노랑은 값 불일치, 빨강은 B에 대응하는 A 행/값이 없는 경우에만 사용합니다.
-const COLORS = { missing: "F4CCCC", different: "FFF2CC" };
+// 노랑은 값 불일치, 빨강은 B에 대응하는 A 행 없음, 파랑은 A에 대응하는 B 행 없음입니다.
+const COLORS = { missing: "F4CCCC", different: "FFF2CC", aOnly: "CFE2F3" };
 const A_HEADERS = {
   date: ["일자", "거래일자", "작성일자"],
   business: ["사업자(주민)번호", "사업자등록번호", "사업자번호"],
@@ -107,6 +107,16 @@ function add(map, key, row) {
   map.set(key, [...(map.get(key) ?? []), row]);
 }
 
+function uniqueSheetName(book, baseName) {
+  let candidate = baseName.slice(0, 31); let number = 2;
+  while (book.Sheets[candidate]) {
+    const suffix = ` (${number})`;
+    candidate = `${baseName.slice(0, 31 - suffix.length)}${suffix}`;
+    number += 1;
+  }
+  return candidate;
+}
+
 function invoiceKey(sheet, columns, row) {
   const businessNumber = digits(cellAt(sheet, columns.business, row));
   const date = dateKey(cellAt(sheet, columns.date, row));
@@ -146,7 +156,8 @@ function compareByBusinessGroups(aBytes, bBytes) {
   }
 
   let yellow = 0; let red = 0; let countMismatch = 0; let aOnlyRows = blankA; let bOnlyRows = blankB;
-  let matchedRows = 0; let supplyDifferences = 0; let taxDifferences = 0; let unmatchedBRows = 0; let documentTypeMismatches = 0; let ambiguousBRows = 0;
+  let matchedRows = 0; let supplyDifferences = 0; let taxDifferences = 0; let unmatchedBRows = 0; let documentTypeMismatches = 0; let ambiguousBRows = 0; let blueRows = 0;
+  const aRowsToPaint = new Set();
   const paintMissingBRow = (row) => {
     unmatchedBRows += 1;
     // 대응 불가 계산서는 해당 행의 공급가액 셀 하나만 빨강으로 표시합니다.
@@ -197,12 +208,24 @@ function compareByBusinessGroups(aBytes, bBytes) {
         else if (!sameNumber(aTax, bTax)) { color(bTax, COLORS.different); yellow += 1; taxDifferences += 1; }
       }
     }
+    // B 행이 전혀 없거나 문서유형이 달라 확실히 대응할 수 없는 A 행만 파랑으로 표시합니다.
+    // 여러 행이 남아 어느 행끼리 대응할지 모호한 경우는 파랑으로 단정하지 않습니다.
+    if (remainingBRows.length === 0 || compatibleA.length === 0) {
+      for (const aRow of unusedA) aRowsToPaint.add(aRow);
+    }
     matchedRows += pairs.size;
   }
+  for (const row of aRowsToPaint) {
+    const target = cellAt(a.sheet, a.columns.supply, row);
+    if (usable(target)) { color(target, COLORS.aOnly); blueRows += 1; }
+  }
+  const aOutputSheetName = uniqueSheetName(bBook, "A_매입매출장_확인");
+  bBook.SheetNames.push(aOutputSheetName);
+  bBook.Sheets[aOutputSheetName] = a.sheet;
   return {
     data: XLSX.write(bBook, { type: "array", bookType: "xlsx", cellStyles: true }),
-    yellow, red, countMismatch, aOnlyRows, bOnlyRows, matchedRows, supplyDifferences, taxDifferences, unmatchedBRows, documentTypeMismatches, ambiguousBRows,
-    aRowCount: aRows.length, bRowCount: bRows.length, bHasTax: Boolean(b.columns.tax), aSheetName: a.name, bSheetName: b.name,
+    yellow, red, blueRows, countMismatch, aOnlyRows, bOnlyRows, matchedRows, supplyDifferences, taxDifferences, unmatchedBRows, documentTypeMismatches, ambiguousBRows,
+    aRowCount: aRows.length, bRowCount: bRows.length, bHasTax: Boolean(b.columns.tax), aSheetName: a.name, bSheetName: b.name, aOutputSheetName,
   };
 }
 
@@ -234,7 +257,7 @@ function renderSummary(result) {
     summaryCard("공급가액 차이", `${result.supplyDifferences}건`, result.supplyDifferences ? "warning" : ""),
     summaryCard("세액 차이", result.bHasTax ? `${result.taxDifferences}건` : "해당 없음", result.taxDifferences ? "warning" : ""),
     summaryCard("대응 불가 B행", `${result.unmatchedBRows}행`, result.unmatchedBRows ? "danger" : ""),
-    summaryCard("A 단독 행", `${result.aOnlyRows}행`, result.aOnlyRows ? "danger" : ""),
+    summaryCard("파랑 A행", `${result.blueRows}행`, result.blueRows ? "danger" : ""),
   );
   const notes = [];
   if (result.supplyDifferences) notes.push(summaryNote(`공급가액이 다른 행이 ${result.supplyDifferences}건 있어 B의 공급가액 셀을 노랑으로 표시했습니다.`, "warning"));
@@ -243,7 +266,7 @@ function renderSummary(result) {
   if (result.ambiguousBRows) notes.push(summaryNote(`같은 사업자번호·날짜에 여러 행이 남아 대응 관계가 모호한 B 행이 ${result.ambiguousBRows}건 있어 빨강으로 표시했습니다.`, "danger"));
   if (result.unmatchedBRows > result.documentTypeMismatches + result.ambiguousBRows) notes.push(summaryNote(`A에서 대응 행을 찾지 못한 B 행이 ${result.unmatchedBRows - result.documentTypeMismatches - result.ambiguousBRows}건 있어 빨강으로 표시했습니다.`, "danger"));
   if (result.countMismatch) notes.push(summaryNote(`사업자번호·날짜별 행 수가 다른 그룹이 ${result.countMismatch}개입니다.`, "danger"));
-  if (result.aOnlyRows) notes.push(summaryNote(`A에만 존재하는 행은 ${result.aOnlyRows}건입니다. B 결과 파일에는 대응할 셀이 없어 상태 정보로만 표시합니다.`, "danger"));
+  if (result.blueRows) notes.push(summaryNote(`B에 대응 행이 없는 A 계산서 ${result.blueRows}건을 '${result.aOutputSheetName}' 시트의 공급가액 셀에 파랑으로 표시했습니다.`, "danger"));
   if (!notes.length) notes.push(summaryNote("사업자번호, 문서 유형, 공급가액 기준으로 모든 B 행이 정상 대응됐습니다."));
   summaryNotes.replaceChildren(...notes);
 }
@@ -257,7 +280,7 @@ form.addEventListener("submit", async (event) => {
     const result = compareByBusinessGroups(new Uint8Array(await aFile.arrayBuffer()), new Uint8Array(await bFile.arrayBuffer()));
     const link = document.createElement("a");
     link.href = URL.createObjectURL(new Blob([result.data], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" }));
-    link.download = "B_색상표시_비교결과.xlsx";
+    link.download = "A_B_색상표시_비교결과.xlsx";
     link.click();
     setTimeout(() => URL.revokeObjectURL(link.href), 0);
     status.textContent = "비교가 완료되어 결과 엑셀을 다운로드했습니다.";
