@@ -107,16 +107,6 @@ function add(map, key, row) {
   map.set(key, [...(map.get(key) ?? []), row]);
 }
 
-function uniqueSheetName(book, baseName) {
-  let candidate = baseName.slice(0, 31); let number = 2;
-  while (book.Sheets[candidate]) {
-    const suffix = ` (${number})`;
-    candidate = `${baseName.slice(0, 31 - suffix.length)}${suffix}`;
-    number += 1;
-  }
-  return candidate;
-}
-
 function invoiceKey(sheet, columns, row) {
   const businessNumber = digits(cellAt(sheet, columns.business, row));
   const date = dateKey(cellAt(sheet, columns.date, row));
@@ -219,13 +209,11 @@ function compareByBusinessGroups(aBytes, bBytes) {
     const target = cellAt(a.sheet, a.columns.supply, row);
     if (usable(target)) { color(target, COLORS.aOnly); blueRows += 1; }
   }
-  const aOutputSheetName = uniqueSheetName(bBook, "A_매입매출장_확인");
-  bBook.SheetNames.push(aOutputSheetName);
-  bBook.Sheets[aOutputSheetName] = a.sheet;
   return {
-    data: XLSX.write(bBook, { type: "array", bookType: "xlsx", cellStyles: true }),
+    bData: XLSX.write(bBook, { type: "array", bookType: "xlsx", cellStyles: true }),
+    aData: XLSX.write(aBook, { type: "array", bookType: "xlsx", cellStyles: true }),
     yellow, red, blueRows, countMismatch, aOnlyRows, bOnlyRows, matchedRows, supplyDifferences, taxDifferences, unmatchedBRows, documentTypeMismatches, ambiguousBRows,
-    aRowCount: aRows.length, bRowCount: bRows.length, bHasTax: Boolean(b.columns.tax), aSheetName: a.name, bSheetName: b.name, aOutputSheetName,
+    aRowCount: aRows.length, bRowCount: bRows.length, bHasTax: Boolean(b.columns.tax), aSheetName: a.name, bSheetName: b.name,
   };
 }
 
@@ -245,6 +233,14 @@ function summaryCard(label, value, tone = "") {
 }
 function summaryNote(textValue, tone = "") {
   const note = document.createElement("li"); note.className = tone; note.textContent = textValue; return note;
+}
+function downloadWorkbook(data, filename) {
+  const link = document.createElement("a");
+  const url = URL.createObjectURL(new Blob([data], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" }));
+  link.href = url;
+  link.download = filename;
+  link.click();
+  setTimeout(() => URL.revokeObjectURL(url), 0);
 }
 function renderSummary(result) {
   const hasIssues = result.yellow > 0 || result.red > 0;
@@ -266,7 +262,7 @@ function renderSummary(result) {
   if (result.ambiguousBRows) notes.push(summaryNote(`같은 사업자번호·날짜에 여러 행이 남아 대응 관계가 모호한 B 행이 ${result.ambiguousBRows}건 있어 빨강으로 표시했습니다.`, "danger"));
   if (result.unmatchedBRows > result.documentTypeMismatches + result.ambiguousBRows) notes.push(summaryNote(`A에서 대응 행을 찾지 못한 B 행이 ${result.unmatchedBRows - result.documentTypeMismatches - result.ambiguousBRows}건 있어 빨강으로 표시했습니다.`, "danger"));
   if (result.countMismatch) notes.push(summaryNote(`사업자번호·날짜별 행 수가 다른 그룹이 ${result.countMismatch}개입니다.`, "danger"));
-  if (result.blueRows) notes.push(summaryNote(`B에 대응 행이 없는 A 계산서 ${result.blueRows}건을 '${result.aOutputSheetName}' 시트의 공급가액 셀에 파랑으로 표시했습니다.`, "danger"));
+  if (result.blueRows) notes.push(summaryNote(`B에 대응 행이 없는 A 계산서 ${result.blueRows}건을 A 결과 파일의 공급가액 셀에 파랑으로 표시했습니다.`, "danger"));
   if (!notes.length) notes.push(summaryNote("사업자번호, 문서 유형, 공급가액 기준으로 모든 B 행이 정상 대응됐습니다."));
   summaryNotes.replaceChildren(...notes);
 }
@@ -278,12 +274,9 @@ form.addEventListener("submit", async (event) => {
   try {
     const aFile = form.elements.aFile.files[0]; const bFile = form.elements.bFile.files[0];
     const result = compareByBusinessGroups(new Uint8Array(await aFile.arrayBuffer()), new Uint8Array(await bFile.arrayBuffer()));
-    const link = document.createElement("a");
-    link.href = URL.createObjectURL(new Blob([result.data], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" }));
-    link.download = "A_B_색상표시_비교결과.xlsx";
-    link.click();
-    setTimeout(() => URL.revokeObjectURL(link.href), 0);
-    status.textContent = "비교가 완료되어 결과 엑셀을 다운로드했습니다.";
+    downloadWorkbook(result.bData, "B_색상표시_비교결과.xlsx");
+    downloadWorkbook(result.aData, "A_파랑표시_비교결과.xlsx");
+    status.textContent = "비교가 완료되어 B·A 결과 엑셀 파일을 각각 다운로드했습니다.";
     renderSummary(result);
   } catch (error) {
     status.textContent = `처리 오류: ${error.message}`;
