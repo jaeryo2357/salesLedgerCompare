@@ -1,6 +1,7 @@
 /* global XLSX */
 // 노랑은 값 불일치, 빨강은 B에 대응하는 A 행 없음, 파랑은 A에 대응하는 B 행 없음입니다.
 const COLORS = { missing: "F4CCCC", different: "FFF2CC", aOnly: "CFE2F3" };
+const CLOSE_SUPPLY_DIFFERENCE = 1000;
 const A_HEADERS = {
   business: ["사업자(주민)번호", "사업자등록번호", "사업자번호"],
   supply: ["매입 공급가액", "매입공급가액"],
@@ -78,6 +79,10 @@ const sameNumber = (a, b) => {
   const left = numeric(a); const right = numeric(b);
   return left !== null && right !== null && Math.abs(left - right) < 0.000001;
 };
+const supplyDifference = (a, b) => {
+  const left = numeric(a); const right = numeric(b);
+  return left === null || right === null ? null : Math.abs(left - right);
+};
 const taxMode = (cell) => {
   const value = headerKey(text(cell));
   if (value.includes("불공")) return "disallowed";
@@ -141,7 +146,7 @@ function compareByBusinessGroups(aBytes, bBytes) {
   }
 
   let yellow = 0; let red = 0; let countMismatch = 0; let aOnlyRows = blankA; let bOnlyRows = blankB;
-  let matchedRows = 0; let supplyDifferences = 0; let taxDifferences = 0; let unmatchedBRows = 0; let documentTypeMismatches = 0; let ambiguousBRows = 0; let blueRows = 0;
+  let matchedRows = 0; let supplyDifferences = 0; let taxDifferences = 0; let nearSupplyMatches = 0; let unmatchedBRows = 0; let documentTypeMismatches = 0; let ambiguousBRows = 0; let differentInvoiceBRows = 0; let blueRows = 0;
   const aRowsToPaint = new Set();
   const details = [];
   const bDetail = (row, values) => details.push({
@@ -194,40 +199,77 @@ function compareByBusinessGroups(aBytes, bBytes) {
     if (bBusinessRows.length > aBusinessRows.length) bOnlyRows += bBusinessRows.length - aBusinessRows.length;
 
     // 사업자번호와 문서유형이 같은 그룹 안에서만 비교합니다. 날짜는 비교하지 않습니다.
-    // 같은 그룹에 여러 행이 남아 대응 관계가 모호하면 노랑 대신 빨강으로 표시합니다.
+    // 공급가액이 1,000원 미만으로 차이나는 경우에만 같은 계산서로 추정합니다.
     const unusedA = new Set(aBusinessRows);
     const pairs = new Map();
     for (const bRow of bBusinessRows) {
       const exactA = [...unusedA].find((aRow) => isDocumentTypeCompatible(a.sheet, a.columns, aRow, b.columns) && isExactMatch(a.sheet, a.columns, aRow, b.sheet, b.columns, bRow));
-      if (exactA !== undefined) { pairs.set(bRow, exactA); unusedA.delete(exactA); }
+      if (exactA !== undefined) { pairs.set(bRow, { aRow: exactA, matchMethod: "exact" }); unusedA.delete(exactA); }
     }
-    const remainingBRows = bBusinessRows.filter((bRow) => !pairs.has(bRow));
-    const compatibleA = [...unusedA].filter((aRow) => isDocumentTypeCompatible(a.sheet, a.columns, aRow, b.columns));
-    if (remainingBRows.length === 1 && compatibleA.length === 1) {
-      pairs.set(remainingBRows[0], compatibleA[0]);
-      unusedA.delete(compatibleA[0]);
-    } else {
+    let remainingBRows = bBusinessRows.filter((bRow) => !pairs.has(bRow));
+    let compatibleA = [...unusedA].filter((aRow) => isDocumentTypeCompatible(a.sheet, a.columns, aRow, b.columns));
+
+    // 여러 행이 남아도 가장 가까운 금액 후보가 A/B 양쪽에서 하나씩으로 확정되면 대응합니다.
+    // 최소 차액 후보가 동률이면 임의로 연결하지 않고 빨강으로 남깁니다.
+    while (remainingBRows.length && compatibleA.length) {
+      const nearestCandidates = [];
+      for (const bRow of remainingBRows) {
+        const candidates = compatibleA
+          .map((aRow) => ({ aRow, difference: supplyDifference(cellAt(a.sheet, a.columns.supply, aRow), cellAt(b.sheet, b.columns.supply, bRow)) }))
+          .filter((candidate) => candidate.difference !== null && candidate.difference < CLOSE_SUPPLY_DIFFERENCE);
+        if (!candidates.length) continue;
+        const minimum = Math.min(...candidates.map((candidate) => candidate.difference));
+        const nearest = candidates.filter((candidate) => Math.abs(candidate.difference - minimum) < 0.000001);
+        if (nearest.length === 1) nearestCandidates.push({ bRow, ...nearest[0] });
+      }
+      const candidateCountByA = new Map();
+      for (const candidate of nearestCandidates) candidateCountByA.set(candidate.aRow, (candidateCountByA.get(candidate.aRow) ?? 0) + 1);
+      const confirmed = nearestCandidates.filter((candidate) => candidateCountByA.get(candidate.aRow) === 1);
+      if (!confirmed.length) break;
+      for (const candidate of confirmed) {
+        pairs.set(candidate.bRow, { aRow: candidate.aRow, matchMethod: "near", difference: candidate.difference });
+        unusedA.delete(candidate.aRow);
+        if (candidate.difference > 0.000001) nearSupplyMatches += 1;
+      }
+      remainingBRows = bBusinessRows.filter((bRow) => !pairs.has(bRow));
+      compatibleA = [...unusedA].filter((aRow) => isDocumentTypeCompatible(a.sheet, a.columns, aRow, b.columns));
+    }
+    const hasNearCandidate = remainingBRows.some((bRow) => compatibleA.some((aRow) => {
+      const difference = supplyDifference(cellAt(a.sheet, a.columns.supply, aRow), cellAt(b.sheet, b.columns.supply, bRow));
+      return difference !== null && difference < CLOSE_SUPPLY_DIFFERENCE;
+    }));
+    if (remainingBRows.length) {
       for (const bRow of remainingBRows) {
         const noCompatibleDocument = aBusinessRows.length > 0 && !aBusinessRows.some((aRow) => isDocumentTypeCompatible(a.sheet, a.columns, aRow, b.columns));
+        const differences = compatibleA
+          .map((aRow) => supplyDifference(cellAt(a.sheet, a.columns.supply, aRow), cellAt(b.sheet, b.columns.supply, bRow)))
+          .filter((difference) => difference !== null);
+        const smallestDifference = differences.length ? Math.min(...differences) : null;
+        const hasCloseCandidate = smallestDifference !== null && smallestDifference < CLOSE_SUPPLY_DIFFERENCE;
         if (noCompatibleDocument) documentTypeMismatches += 1;
-        else if (aBusinessRows.length > 0) ambiguousBRows += 1;
+        else if (hasCloseCandidate) ambiguousBRows += 1;
+        else if (smallestDifference !== null) differentInvoiceBRows += 1;
         paintMissingBRow(bRow);
         const candidateRows = aBusinessRows.map((row) => `${row}행`).join(", ") || "없음";
         const reason = noCompatibleDocument
           ? `같은 사업자번호의 A 후보(${candidateRows})는 있지만 문서 유형이 다릅니다. B는 ${bDocumentLabel(b.columns)}이고 A 후보와는 비교하지 않았습니다.`
-          : aBusinessRows.length
-            ? `같은 사업자번호에 B ${remainingBRows.length}행과 A ${compatibleA.length}행이 남았습니다. 금액이 같은 1:1 대응을 확정할 수 없어 임의로 노랑 처리하지 않고 빨강으로 표시했습니다.`
+          : hasCloseCandidate
+            ? `같은 사업자번호에 공급가액 차이 1,000원 미만인 A 후보가 여러 개 남았습니다. 어느 행과 대응하는지 확정할 수 없어 임의로 노랑 처리하지 않고 빨강으로 표시했습니다.`
+            : smallestDifference !== null
+              ? `가장 가까운 A 후보와의 공급가액 차이가 ${amountLabel({ v: smallestDifference })}원으로 1,000원 이상입니다. 같은 계산서가 아닌 것으로 판단해 빨강으로 표시했습니다.`
             : "같은 사업자번호의 A 행을 찾지 못했습니다.";
-        bDetail(bRow, { tone: "danger", status: noCompatibleDocument ? "문서 유형 불일치" : aBusinessRows.length ? "대응 관계 모호" : "대응 불가", isIssue: true, reason, candidateRows });
+        bDetail(bRow, { tone: "danger", status: noCompatibleDocument ? "문서 유형 불일치" : hasCloseCandidate ? "대응 관계 모호" : smallestDifference !== null ? "다른 계산서 추정" : "대응 불가", isIssue: true, reason, candidateRows });
       }
     }
-    for (const [bRow, aRow] of pairs) {
+    for (const [bRow, pair] of pairs) {
+      const { aRow } = pair;
       const aSupply = cellAt(a.sheet, a.columns.supply, aRow);
       const bSupply = cellAt(b.sheet, b.columns.supply, bRow);
       const reasons = [];
       let hasMissingValue = false;
       if (!usable(aSupply)) { color(bSupply, COLORS.missing); red += 1; hasMissingValue = true; reasons.push("A의 공급가액이 비어 있습니다."); }
       else if (!sameNumber(aSupply, bSupply)) { color(bSupply, COLORS.different); yellow += 1; supplyDifferences += 1; reasons.push(`공급가액이 다릅니다 (A ${amountLabel(aSupply)} / B ${amountLabel(bSupply)}).`); }
+      if (pair.matchMethod === "near" && pair.difference > 0.000001) reasons.unshift(`공급가액 차이가 ${amountLabel({ v: pair.difference })}원으로 1,000원 미만이어서 같은 계산서로 추정했습니다.`);
 
       if (taxMode(cellAt(a.sheet, a.columns.taxType, aRow)) === "disallowed" && b.columns.tax) {
         const aTax = cellAt(a.sheet, a.columns.tax, aRow);
@@ -246,9 +288,9 @@ function compareByBusinessGroups(aBytes, bBytes) {
         reason: reasons.length ? reasons.join(" ") : `사업자번호와 문서 유형이 맞는 A ${aRow}행과 1:1로 대응했고, 비교 대상 금액이 같습니다.`,
       });
     }
-    // B 행이 전혀 없거나 문서유형이 달라 확실히 대응할 수 없는 A 행만 파랑으로 표시합니다.
-    // 여러 행이 남아 어느 행끼리 대응할지 모호한 경우는 파랑으로 단정하지 않습니다.
-    if (remainingBRows.length === 0 || compatibleA.length === 0) {
+    // 1,000원 이상 차이만 남은 경우는 서로 다른 계산서로 보므로 A 행도 파랑으로 표시합니다.
+    // 1,000원 미만 후보가 여러 개라 모호한 경우에는 파랑으로 단정하지 않습니다.
+    if (remainingBRows.length === 0 || compatibleA.length === 0 || !hasNearCandidate) {
       for (const aRow of unusedA) aRowsToPaint.add(aRow);
     }
     matchedRows += pairs.size;
@@ -267,7 +309,7 @@ function compareByBusinessGroups(aBytes, bBytes) {
   return {
     bData: XLSX.write(bBook, { type: "array", bookType: "xlsx", cellStyles: true }),
     aData: XLSX.write(aBook, { type: "array", bookType: "xlsx", cellStyles: true }),
-    yellow, red, blueRows, countMismatch, aOnlyRows, bOnlyRows, matchedRows, supplyDifferences, taxDifferences, unmatchedBRows, documentTypeMismatches, ambiguousBRows,
+    yellow, red, blueRows, countMismatch, aOnlyRows, bOnlyRows, matchedRows, supplyDifferences, taxDifferences, nearSupplyMatches, unmatchedBRows, documentTypeMismatches, ambiguousBRows, differentInvoiceBRows,
     aRowCount: aRows.length, bRowCount: bRows.length, bHasTax: Boolean(b.columns.tax), aSheetName: a.name, bSheetName: b.name, details,
   };
 }
@@ -350,16 +392,19 @@ function renderSummary(result) {
     summaryCard("읽은 행", `A ${result.aRowCount} · B ${result.bRowCount}`),
     summaryCard("A와 대응된 행", `${result.matchedRows}행`, result.matchedRows === result.bRowCount ? "success" : ""),
     summaryCard("공급가액 차이", `${result.supplyDifferences}건`, result.supplyDifferences ? "warning" : ""),
+    summaryCard("1천원 미만 추정", `${result.nearSupplyMatches}행`, result.nearSupplyMatches ? "warning" : ""),
     summaryCard("세액 차이", result.bHasTax ? `${result.taxDifferences}건` : "해당 없음", result.taxDifferences ? "warning" : ""),
     summaryCard("대응 불가 B행", `${result.unmatchedBRows}행`, result.unmatchedBRows ? "danger" : ""),
     summaryCard("파랑 A행", `${result.blueRows}행`, result.blueRows ? "danger" : ""),
   );
   const notes = [];
   if (result.supplyDifferences) notes.push(summaryNote(`공급가액이 다른 행이 ${result.supplyDifferences}건 있어 B의 공급가액 셀을 노랑으로 표시했습니다.`, "warning"));
+  if (result.nearSupplyMatches) notes.push(summaryNote(`공급가액 차이가 1,000원 미만인 ${result.nearSupplyMatches}행은 같은 계산서로 추정해 노랑으로 표시했습니다.`, "warning"));
   if (result.taxDifferences) notes.push(summaryNote(`불공 행 중 세액이 다른 행이 ${result.taxDifferences}건 있어 B의 세액 셀을 노랑으로 표시했습니다.`, "warning"));
   if (result.documentTypeMismatches) notes.push(summaryNote(`같은 사업자번호지만 면세/세금계산서 문서 유형이 맞지 않는 B 행이 ${result.documentTypeMismatches}건 있어 빨강으로 표시했습니다.`, "danger"));
   if (result.ambiguousBRows) notes.push(summaryNote(`같은 사업자번호에 여러 행이 남아 대응 관계가 모호한 B 행이 ${result.ambiguousBRows}건 있어 빨강으로 표시했습니다.`, "danger"));
-  if (result.unmatchedBRows > result.documentTypeMismatches + result.ambiguousBRows) notes.push(summaryNote(`A에서 대응 행을 찾지 못한 B 행이 ${result.unmatchedBRows - result.documentTypeMismatches - result.ambiguousBRows}건 있어 빨강으로 표시했습니다.`, "danger"));
+  if (result.differentInvoiceBRows) notes.push(summaryNote(`가장 가까운 공급가액과도 1,000원 이상 차이 나는 B 행이 ${result.differentInvoiceBRows}건 있어 다른 계산서로 보고 빨강으로 표시했습니다.`, "danger"));
+  if (result.unmatchedBRows > result.documentTypeMismatches + result.ambiguousBRows + result.differentInvoiceBRows) notes.push(summaryNote(`A에서 대응 행을 찾지 못한 B 행이 ${result.unmatchedBRows - result.documentTypeMismatches - result.ambiguousBRows - result.differentInvoiceBRows}건 있어 빨강으로 표시했습니다.`, "danger"));
   if (result.countMismatch) notes.push(summaryNote(`사업자번호별 행 수가 다른 그룹이 ${result.countMismatch}개입니다.`, "danger"));
   if (result.blueRows) notes.push(summaryNote(`B에 대응 행이 없는 A 계산서 ${result.blueRows}건을 A 결과 파일의 공급가액 셀에 파랑으로 표시했습니다.`, "danger"));
   if (!notes.length) notes.push(summaryNote("사업자번호, 문서 유형, 공급가액 기준으로 모든 B 행이 정상 대응됐습니다."));
