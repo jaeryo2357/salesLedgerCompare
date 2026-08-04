@@ -181,15 +181,6 @@ function compareByBusinessGroups(aBytes, bBytes) {
       });
     }
   }
-  for (const row of aRows) {
-    if (!invoiceKey(a.sheet, a.columns, row)) {
-      aDetail(row, {
-        tone: "info", status: "비교 보류", isIssue: true,
-        reason: "사업자번호가 비어 있어 B 파일과 비교할 수 없습니다. 이 행에는 색을 표시하지 않았습니다.",
-      });
-    }
-  }
-
   const invoiceKeys = new Set([...aGroups.keys(), ...bGroups.keys()]);
   for (const key of invoiceKeys) {
     const aBusinessRows = aGroups.get(key) ?? [];
@@ -277,16 +268,18 @@ function compareByBusinessGroups(aBytes, bBytes) {
         if (!usable(aTax)) { color(bTax, COLORS.missing); red += 1; hasMissingValue = true; reasons.push("불공 행인데 A의 세액이 비어 있습니다."); }
         else if (!sameNumber(aTax, bTax)) { color(bTax, COLORS.different); yellow += 1; taxDifferences += 1; reasons.push(`불공 행의 세액이 다릅니다 (A ${amountLabel(aTax)} / B ${amountLabel(bTax)}).`); }
       }
-      bDetail(bRow, {
-        tone: hasMissingValue ? "danger" : reasons.length ? "warning" : "match",
-        status: hasMissingValue ? "입력값 확인 필요" : reasons.length ? "값 차이" : "정상 일치",
-        isIssue: hasMissingValue || reasons.length > 0,
-        aRow,
-        aDocument: aDocumentLabel(a.sheet, a.columns, aRow),
-        aSupply: amountLabel(aSupply),
-        aTax: amountLabel(cellAt(a.sheet, a.columns.tax, aRow)),
-        reason: reasons.length ? reasons.join(" ") : `사업자번호와 문서 유형이 맞는 A ${aRow}행과 1:1로 대응했고, 비교 대상 금액이 같습니다.`,
-      });
+      if (hasMissingValue || reasons.length) {
+        bDetail(bRow, {
+          tone: hasMissingValue ? "danger" : "warning",
+          status: hasMissingValue ? "입력값 확인 필요" : "값 차이",
+          isIssue: true,
+          aRow,
+          aDocument: aDocumentLabel(a.sheet, a.columns, aRow),
+          aSupply: amountLabel(aSupply),
+          aTax: amountLabel(cellAt(a.sheet, a.columns.tax, aRow)),
+          reason: reasons.join(" "),
+        });
+      }
     }
     // 1,000원 이상 차이만 남은 경우는 서로 다른 계산서로 보므로 A 행도 파랑으로 표시합니다.
     // 1,000원 미만 후보가 여러 개라 모호한 경우에는 파랑으로 단정하지 않습니다.
@@ -322,11 +315,9 @@ const summaryTitle = document.querySelector("#summary-title");
 const summaryDescription = document.querySelector("#summary-description");
 const summaryCards = document.querySelector("#summary-cards");
 const summaryNotes = document.querySelector("#summary-notes");
+const detailSection = document.querySelector("#detail-section");
 const detailDescription = document.querySelector("#detail-description");
 const detailList = document.querySelector("#detail-list");
-const detailToggle = document.querySelector("#detail-toggle");
-let latestResult = null;
-let showAllDetails = false;
 function summaryCard(label, value, tone = "") {
   const card = document.createElement("div"); card.className = `summary-card ${tone}`;
   const labelElement = document.createElement("span"); labelElement.textContent = label;
@@ -375,16 +366,12 @@ function detailItem(detail) {
   return item;
 }
 function renderDetails(result) {
-  const issues = result.details.filter((detail) => detail.isIssue);
-  const shown = showAllDetails ? result.details : issues;
-  detailDescription.textContent = showAllDetails
-    ? `전체 ${result.details.length}건의 비교 판정을 보고 있습니다. B 행을 먼저, B에만 없는 A 행을 뒤에 표시합니다.`
-    : `검토가 필요한 ${issues.length}건만 표시합니다. 정상 일치 행도 전체 보기에서 확인할 수 있습니다.`;
-  detailToggle.textContent = showAllDetails ? "검토 항목만 보기" : `전체 ${result.details.length}건 보기`;
-  detailList.replaceChildren(...shown.map(detailItem));
+  detailSection.hidden = result.details.length === 0;
+  detailDescription.textContent = `색을 표시한 ${result.details.length}행의 판정 근거입니다. B 행을 먼저, B에 대응하지 않는 A 행을 뒤에 표시합니다.`;
+  detailList.replaceChildren(...result.details.map(detailItem));
 }
 function renderSummary(result) {
-  const hasIssues = result.details.some((detail) => detail.isIssue);
+  const hasIssues = result.details.length > 0;
   summary.hidden = false;
   summaryTitle.textContent = hasIssues ? "비교 결과를 확인해 주세요" : "모든 비교가 정상 완료됐어요";
   summaryDescription.textContent = `${result.aSheetName} ↔ ${result.bSheetName} · B 문서 유형: ${result.bHasTax ? "전자세금계산서" : "전자계산서(면세)"}`;
@@ -409,19 +396,12 @@ function renderSummary(result) {
   if (result.blueRows) notes.push(summaryNote(`B에 대응 행이 없는 A 계산서 ${result.blueRows}건을 A 결과 파일의 공급가액 셀에 파랑으로 표시했습니다.`, "danger"));
   if (!notes.length) notes.push(summaryNote("사업자번호, 문서 유형, 공급가액 기준으로 모든 B 행이 정상 대응됐습니다."));
   summaryNotes.replaceChildren(...notes);
-  latestResult = result;
   renderDetails(result);
 }
-detailToggle.addEventListener("click", () => {
-  if (!latestResult) return;
-  showAllDetails = !showAllDetails;
-  renderDetails(latestResult);
-});
 form.addEventListener("submit", async (event) => {
   event.preventDefault();
   button.disabled = true;
   summary.hidden = true;
-  showAllDetails = false;
   status.textContent = "이 브라우저 안에서 엑셀 헤더와 사업자번호를 확인하는 중입니다…";
   try {
     const aFile = form.elements.aFile.files[0]; const bFile = form.elements.bFile.files[0];
