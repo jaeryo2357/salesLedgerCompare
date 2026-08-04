@@ -125,6 +125,23 @@ function isExactMatch(aSheet, aColumns, aRow, bSheet, bColumns, bRow) {
   return sameNumber(cellAt(aSheet, aColumns.tax, aRow), cellAt(bSheet, bColumns.tax, bRow));
 }
 
+const valueLabel = (cell) => text(cell) || "입력 없음";
+const amountLabel = (cell) => {
+  const value = numeric(cell);
+  return value === null ? valueLabel(cell) : new Intl.NumberFormat("ko-KR", { maximumFractionDigits: 6 }).format(value);
+};
+const dateLabel = (cell) => {
+  const value = dateKey(cell);
+  return value ? `${value.slice(0, 4)}-${value.slice(4, 6)}-${value.slice(6, 8)}` : valueLabel(cell);
+};
+const aDocumentLabel = (sheet, columns, row) => {
+  const mode = taxMode(cellAt(sheet, columns.taxType, row));
+  if (mode === "disallowed") return "불공 (공급가액·세액 비교)";
+  if (mode === "exempt") return "면세";
+  return "과세/기타 (공급가액 비교)";
+};
+const bDocumentLabel = (columns) => columns.tax ? "전자세금계산서" : "전자계산서 (면세)";
+
 function compareByBusinessGroups(aBytes, bBytes) {
   const aBook = XLSX.read(aBytes, { type: "array", cellStyles: true, cellDates: true });
   const bBook = XLSX.read(bBytes, { type: "array", cellStyles: true, cellDates: true });
@@ -148,6 +165,25 @@ function compareByBusinessGroups(aBytes, bBytes) {
   let yellow = 0; let red = 0; let countMismatch = 0; let aOnlyRows = blankA; let bOnlyRows = blankB;
   let matchedRows = 0; let supplyDifferences = 0; let taxDifferences = 0; let unmatchedBRows = 0; let documentTypeMismatches = 0; let ambiguousBRows = 0; let blueRows = 0;
   const aRowsToPaint = new Set();
+  const details = [];
+  const bDetail = (row, values) => details.push({
+    source: "B", sourceRow: row,
+    businessNumber: valueLabel(cellAt(b.sheet, b.columns.business, row)),
+    date: dateLabel(cellAt(b.sheet, b.columns.date, row)),
+    bDocument: bDocumentLabel(b.columns),
+    bSupply: amountLabel(cellAt(b.sheet, b.columns.supply, row)),
+    bTax: b.columns.tax ? amountLabel(cellAt(b.sheet, b.columns.tax, row)) : "해당 없음",
+    ...values,
+  });
+  const aDetail = (row, values) => details.push({
+    source: "A", sourceRow: row,
+    businessNumber: valueLabel(cellAt(a.sheet, a.columns.business, row)),
+    date: dateLabel(cellAt(a.sheet, a.columns.date, row)),
+    aDocument: aDocumentLabel(a.sheet, a.columns, row),
+    aSupply: amountLabel(cellAt(a.sheet, a.columns.supply, row)),
+    aTax: amountLabel(cellAt(a.sheet, a.columns.tax, row)),
+    ...values,
+  });
   const paintMissingBRow = (row) => {
     unmatchedBRows += 1;
     // 대응 불가 계산서는 해당 행의 공급가액 셀 하나만 빨강으로 표시합니다.
@@ -155,7 +191,23 @@ function compareByBusinessGroups(aBytes, bBytes) {
     const target = cellAt(b.sheet, b.columns.supply, row) ?? cellAt(b.sheet, b.columns.business, row);
     if (usable(target)) { color(target, COLORS.missing); red += 1; }
   };
-  for (const row of bRows) if (!invoiceKey(b.sheet, b.columns, row)) paintMissingBRow(row);
+  for (const row of bRows) {
+    if (!invoiceKey(b.sheet, b.columns, row)) {
+      paintMissingBRow(row);
+      bDetail(row, {
+        tone: "danger", status: "대응 불가", isIssue: true,
+        reason: "사업자번호 또는 날짜가 비어 있어 A 파일에서 비교할 후보를 찾을 수 없습니다.",
+      });
+    }
+  }
+  for (const row of aRows) {
+    if (!invoiceKey(a.sheet, a.columns, row)) {
+      aDetail(row, {
+        tone: "info", status: "비교 보류", isIssue: true,
+        reason: "사업자번호 또는 날짜가 비어 있어 B 파일과 비교할 수 없습니다. 이 행에는 색을 표시하지 않았습니다.",
+      });
+    }
+  }
 
   const invoiceKeys = new Set([...aGroups.keys(), ...bGroups.keys()]);
   for (const key of invoiceKeys) {
@@ -180,23 +232,43 @@ function compareByBusinessGroups(aBytes, bBytes) {
       unusedA.delete(compatibleA[0]);
     } else {
       for (const bRow of remainingBRows) {
-        if (aBusinessRows.length > 0 && !aBusinessRows.some((aRow) => isDocumentTypeCompatible(a.sheet, a.columns, aRow, b.columns))) documentTypeMismatches += 1;
+        const noCompatibleDocument = aBusinessRows.length > 0 && !aBusinessRows.some((aRow) => isDocumentTypeCompatible(a.sheet, a.columns, aRow, b.columns));
+        if (noCompatibleDocument) documentTypeMismatches += 1;
         else if (aBusinessRows.length > 0) ambiguousBRows += 1;
         paintMissingBRow(bRow);
+        const candidateRows = aBusinessRows.map((row) => `${row}행`).join(", ") || "없음";
+        const reason = noCompatibleDocument
+          ? `같은 사업자번호·날짜의 A 후보(${candidateRows})는 있지만 문서 유형이 다릅니다. B는 ${bDocumentLabel(b.columns)}이고 A 후보와는 비교하지 않았습니다.`
+          : aBusinessRows.length
+            ? `같은 사업자번호·날짜에 B ${remainingBRows.length}행과 A ${compatibleA.length}행이 남았습니다. 금액이 같은 1:1 대응을 확정할 수 없어 임의로 노랑 처리하지 않고 빨강으로 표시했습니다.`
+            : "같은 사업자번호·날짜의 A 행을 찾지 못했습니다.";
+        bDetail(bRow, { tone: "danger", status: noCompatibleDocument ? "문서 유형 불일치" : aBusinessRows.length ? "대응 관계 모호" : "대응 불가", isIssue: true, reason, candidateRows });
       }
     }
     for (const [bRow, aRow] of pairs) {
       const aSupply = cellAt(a.sheet, a.columns.supply, aRow);
       const bSupply = cellAt(b.sheet, b.columns.supply, bRow);
-      if (!usable(aSupply)) { color(bSupply, COLORS.missing); red += 1; }
-      else if (!sameNumber(aSupply, bSupply)) { color(bSupply, COLORS.different); yellow += 1; supplyDifferences += 1; }
+      const reasons = [];
+      let hasMissingValue = false;
+      if (!usable(aSupply)) { color(bSupply, COLORS.missing); red += 1; hasMissingValue = true; reasons.push("A의 공급가액이 비어 있습니다."); }
+      else if (!sameNumber(aSupply, bSupply)) { color(bSupply, COLORS.different); yellow += 1; supplyDifferences += 1; reasons.push(`공급가액이 다릅니다 (A ${amountLabel(aSupply)} / B ${amountLabel(bSupply)}).`); }
 
       if (taxMode(cellAt(a.sheet, a.columns.taxType, aRow)) === "disallowed" && b.columns.tax) {
         const aTax = cellAt(a.sheet, a.columns.tax, aRow);
         const bTax = cellAt(b.sheet, b.columns.tax, bRow);
-        if (!usable(aTax)) { color(bTax, COLORS.missing); red += 1; }
-        else if (!sameNumber(aTax, bTax)) { color(bTax, COLORS.different); yellow += 1; taxDifferences += 1; }
+        if (!usable(aTax)) { color(bTax, COLORS.missing); red += 1; hasMissingValue = true; reasons.push("불공 행인데 A의 세액이 비어 있습니다."); }
+        else if (!sameNumber(aTax, bTax)) { color(bTax, COLORS.different); yellow += 1; taxDifferences += 1; reasons.push(`불공 행의 세액이 다릅니다 (A ${amountLabel(aTax)} / B ${amountLabel(bTax)}).`); }
       }
+      bDetail(bRow, {
+        tone: hasMissingValue ? "danger" : reasons.length ? "warning" : "match",
+        status: hasMissingValue ? "입력값 확인 필요" : reasons.length ? "값 차이" : "정상 일치",
+        isIssue: hasMissingValue || reasons.length > 0,
+        aRow,
+        aDocument: aDocumentLabel(a.sheet, a.columns, aRow),
+        aSupply: amountLabel(aSupply),
+        aTax: amountLabel(cellAt(a.sheet, a.columns.tax, aRow)),
+        reason: reasons.length ? reasons.join(" ") : `사업자번호·날짜·문서 유형이 맞는 A ${aRow}행과 1:1로 대응했고, 비교 대상 금액이 같습니다.`,
+      });
     }
     // B 행이 전혀 없거나 문서유형이 달라 확실히 대응할 수 없는 A 행만 파랑으로 표시합니다.
     // 여러 행이 남아 어느 행끼리 대응할지 모호한 경우는 파랑으로 단정하지 않습니다.
@@ -207,13 +279,20 @@ function compareByBusinessGroups(aBytes, bBytes) {
   }
   for (const row of aRowsToPaint) {
     const target = cellAt(a.sheet, a.columns.supply, row);
-    if (usable(target)) { color(target, COLORS.aOnly); blueRows += 1; }
+    if (usable(target)) {
+      color(target, COLORS.aOnly); blueRows += 1;
+      aDetail(row, {
+        tone: "info", status: "B 대응 없음", isIssue: true,
+        reason: "B 파일에서 같은 사업자번호·날짜·문서 유형으로 확정할 수 있는 대응 행이 없어 A 결과 파일의 공급가액 셀을 파랑으로 표시했습니다.",
+      });
+    }
   }
+  details.sort((left, right) => (left.source === right.source ? left.sourceRow - right.sourceRow : left.source === "B" ? -1 : 1));
   return {
     bData: XLSX.write(bBook, { type: "array", bookType: "xlsx", cellStyles: true }),
     aData: XLSX.write(aBook, { type: "array", bookType: "xlsx", cellStyles: true }),
     yellow, red, blueRows, countMismatch, aOnlyRows, bOnlyRows, matchedRows, supplyDifferences, taxDifferences, unmatchedBRows, documentTypeMismatches, ambiguousBRows,
-    aRowCount: aRows.length, bRowCount: bRows.length, bHasTax: Boolean(b.columns.tax), aSheetName: a.name, bSheetName: b.name,
+    aRowCount: aRows.length, bRowCount: bRows.length, bHasTax: Boolean(b.columns.tax), aSheetName: a.name, bSheetName: b.name, details,
   };
 }
 
@@ -225,6 +304,11 @@ const summaryTitle = document.querySelector("#summary-title");
 const summaryDescription = document.querySelector("#summary-description");
 const summaryCards = document.querySelector("#summary-cards");
 const summaryNotes = document.querySelector("#summary-notes");
+const detailDescription = document.querySelector("#detail-description");
+const detailList = document.querySelector("#detail-list");
+const detailToggle = document.querySelector("#detail-toggle");
+let latestResult = null;
+let showAllDetails = false;
 function summaryCard(label, value, tone = "") {
   const card = document.createElement("div"); card.className = `summary-card ${tone}`;
   const labelElement = document.createElement("span"); labelElement.textContent = label;
@@ -242,8 +326,47 @@ function downloadWorkbook(data, filename) {
   link.click();
   setTimeout(() => URL.revokeObjectURL(url), 0);
 }
+function detailValue(label, value) {
+  const item = document.createElement("span");
+  const name = document.createElement("strong");
+  name.textContent = `${label}: `;
+  item.append(name, value);
+  return item;
+}
+function detailItem(detail) {
+  const item = document.createElement("article");
+  item.className = `detail-item ${detail.tone}`;
+  const top = document.createElement("div"); top.className = "detail-top";
+  const status = document.createElement("span"); status.className = "detail-status"; status.textContent = detail.status;
+  const row = document.createElement("span"); row.className = "detail-row"; row.textContent = `${detail.source} 파일 ${detail.sourceRow}행`;
+  top.append(status, row);
+  const key = document.createElement("p"); key.className = "detail-key"; key.textContent = `사업자번호 ${detail.businessNumber} · 날짜 ${detail.date}`;
+  const values = document.createElement("div"); values.className = "detail-values";
+  if (detail.source === "B") {
+    values.append(
+      detailValue("B 문서", detail.bDocument),
+      detailValue("A 대응", detail.aRow ? `${detail.aRow}행${detail.aDocument ? ` · ${detail.aDocument}` : ""}` : detail.candidateRows ? `${detail.candidateRows} 후보` : "없음"),
+      detailValue("공급가액", detail.aSupply ? `A ${detail.aSupply} / B ${detail.bSupply}` : `B ${detail.bSupply}`),
+    );
+    if (detail.bTax !== "해당 없음") values.append(detailValue("세액", detail.aTax ? `A ${detail.aTax} / B ${detail.bTax}` : `B ${detail.bTax}`));
+  } else {
+    values.append(detailValue("A 문서", detail.aDocument), detailValue("공급가액", detail.aSupply), detailValue("세액", detail.aTax));
+  }
+  const reason = document.createElement("p"); reason.className = "detail-reason"; reason.textContent = detail.reason;
+  item.append(top, key, values, reason);
+  return item;
+}
+function renderDetails(result) {
+  const issues = result.details.filter((detail) => detail.isIssue);
+  const shown = showAllDetails ? result.details : issues;
+  detailDescription.textContent = showAllDetails
+    ? `전체 ${result.details.length}건의 비교 판정을 보고 있습니다. B 행을 먼저, B에만 없는 A 행을 뒤에 표시합니다.`
+    : `검토가 필요한 ${issues.length}건만 표시합니다. 정상 일치 행도 전체 보기에서 확인할 수 있습니다.`;
+  detailToggle.textContent = showAllDetails ? "검토 항목만 보기" : `전체 ${result.details.length}건 보기`;
+  detailList.replaceChildren(...shown.map(detailItem));
+}
 function renderSummary(result) {
-  const hasIssues = result.yellow > 0 || result.red > 0;
+  const hasIssues = result.details.some((detail) => detail.isIssue);
   summary.hidden = false;
   summaryTitle.textContent = hasIssues ? "비교 결과를 확인해 주세요" : "모든 비교가 정상 완료됐어요";
   summaryDescription.textContent = `${result.aSheetName} ↔ ${result.bSheetName} · B 문서 유형: ${result.bHasTax ? "전자세금계산서" : "전자계산서(면세)"}`;
@@ -265,11 +388,19 @@ function renderSummary(result) {
   if (result.blueRows) notes.push(summaryNote(`B에 대응 행이 없는 A 계산서 ${result.blueRows}건을 A 결과 파일의 공급가액 셀에 파랑으로 표시했습니다.`, "danger"));
   if (!notes.length) notes.push(summaryNote("사업자번호, 문서 유형, 공급가액 기준으로 모든 B 행이 정상 대응됐습니다."));
   summaryNotes.replaceChildren(...notes);
+  latestResult = result;
+  renderDetails(result);
 }
+detailToggle.addEventListener("click", () => {
+  if (!latestResult) return;
+  showAllDetails = !showAllDetails;
+  renderDetails(latestResult);
+});
 form.addEventListener("submit", async (event) => {
   event.preventDefault();
   button.disabled = true;
   summary.hidden = true;
+  showAllDetails = false;
   status.textContent = "이 브라우저 안에서 엑셀 헤더와 사업자번호를 확인하는 중입니다…";
   try {
     const aFile = form.elements.aFile.files[0]; const bFile = form.elements.bFile.files[0];
