@@ -149,10 +149,10 @@ function compareByBusinessGroups(aBytes, bBytes) {
   let matchedRows = 0; let supplyDifferences = 0; let taxDifferences = 0; let unmatchedBRows = 0; let documentTypeMismatches = 0; let ambiguousBRows = 0;
   const paintMissingBRow = (row) => {
     unmatchedBRows += 1;
-    for (const key of ["business", "supply", "tax"].filter((key) => b.columns[key])) {
-      const target = cellAt(b.sheet, b.columns[key], row);
-      if (usable(target)) { color(target, COLORS.missing); red += 1; }
-    }
+    // 대응 불가 계산서는 해당 행의 공급가액 셀 하나만 빨강으로 표시합니다.
+    // 여러 셀을 모두 칠해 한 건이 여러 오류처럼 보이는 일을 막습니다.
+    const target = cellAt(b.sheet, b.columns.supply, row) ?? cellAt(b.sheet, b.columns.business, row);
+    if (usable(target)) { color(target, COLORS.missing); red += 1; }
   };
   for (const row of bRows) if (!invoiceKey(b.sheet, b.columns, row)) paintMissingBRow(row);
 
