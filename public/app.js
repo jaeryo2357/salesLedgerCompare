@@ -2,12 +2,14 @@
 // 노랑은 값 불일치, 빨강은 B에 대응하는 A 행/값이 없는 경우에만 사용합니다.
 const COLORS = { missing: "F4CCCC", different: "FFF2CC" };
 const A_HEADERS = {
+  date: ["일자", "거래일자", "작성일자"],
   business: ["사업자(주민)번호", "사업자등록번호", "사업자번호"],
   supply: ["매입 공급가액", "매입공급가액"],
   tax: ["매입 부가세", "매입부가세", "매입세액"],
   taxType: ["과세유형", "과세 구분", "과세구분"],
 };
 const B_HEADERS = {
+  date: ["작성일자", "발급일자", "일자", "거래일자"],
   business: ["공급자사업자등록번호", "사업자등록번호", "사업자번호"],
   supply: ["공급가액", "품목공급가액"],
   tax: ["세액", "품목세액", "부가세"],
@@ -22,6 +24,18 @@ const numeric = (cell) => {
   if (!raw) return null;
   const value = Number(raw.replace(/,/g, "").replace(/[^0-9.-]/g, ""));
   return Number.isFinite(value) ? value : null;
+};
+const dateKey = (cell) => {
+  if (cell?.v instanceof Date && !Number.isNaN(cell.v.valueOf())) {
+    return `${cell.v.getFullYear()}${String(cell.v.getMonth() + 1).padStart(2, "0")}${String(cell.v.getDate()).padStart(2, "0")}`;
+  }
+  if (typeof cell?.v === "number" && XLSX.SSF?.parse_date_code) {
+    const parsed = XLSX.SSF.parse_date_code(cell.v);
+    if (parsed) return `${parsed.y}${String(parsed.m).padStart(2, "0")}${String(parsed.d).padStart(2, "0")}`;
+  }
+  const value = text(cell);
+  const match = value.match(/(\d{4})\D?(\d{1,2})\D?(\d{1,2})/);
+  return match ? `${match[1]}${match[2].padStart(2, "0")}${match[3].padStart(2, "0")}` : "";
 };
 const headerKey = (value) => value.toString().replace(/[\s(){}\[\]·ㆍ._\-/:]/g, "").toLowerCase();
 const address = (column, row) => `${column}${row}`;
@@ -93,6 +107,12 @@ function add(map, key, row) {
   map.set(key, [...(map.get(key) ?? []), row]);
 }
 
+function invoiceKey(sheet, columns, row) {
+  const businessNumber = digits(cellAt(sheet, columns.business, row));
+  const date = dateKey(cellAt(sheet, columns.date, row));
+  return businessNumber && date ? `${businessNumber}|${date}` : "";
+}
+
 function isDocumentTypeCompatible(aSheet, aColumns, aRow, bColumns) {
   const aMode = taxMode(cellAt(aSheet, aColumns.taxType, aRow));
   // B에 세액 열이 없으면 전자계산서(면세), 있으면 전자세금계산서로 처리합니다.
@@ -105,40 +125,28 @@ function isExactMatch(aSheet, aColumns, aRow, bSheet, bColumns, bRow) {
   return sameNumber(cellAt(aSheet, aColumns.tax, aRow), cellAt(bSheet, bColumns.tax, bRow));
 }
 
-function differenceCost(aSheet, aColumns, aRow, bSheet, bColumns, bRow) {
-  const aSupply = numeric(cellAt(aSheet, aColumns.supply, aRow));
-  const bSupply = numeric(cellAt(bSheet, bColumns.supply, bRow));
-  let cost = aSupply === null || bSupply === null ? Number.MAX_SAFE_INTEGER : Math.abs(aSupply - bSupply);
-  if (taxMode(cellAt(aSheet, aColumns.taxType, aRow)) === "disallowed" && bColumns.tax) {
-    const aTax = numeric(cellAt(aSheet, aColumns.tax, aRow));
-    const bTax = numeric(cellAt(bSheet, bColumns.tax, bRow));
-    cost += aTax === null || bTax === null ? Number.MAX_SAFE_INTEGER : Math.abs(aTax - bTax);
-  }
-  return cost;
-}
-
 function compareByBusinessGroups(aBytes, bBytes) {
   const aBook = XLSX.read(aBytes, { type: "array", cellStyles: true, cellDates: true });
   const bBook = XLSX.read(bBytes, { type: "array", cellStyles: true, cellDates: true });
   const a = findWorksheet(aBook, A_HEADERS, "A 매입매출장");
-  const b = findWorksheet(bBook, B_HEADERS, "B 전자세금계산서", ["business", "supply"]);
+  const b = findWorksheet(bBook, B_HEADERS, "B 전자세금계산서", ["date", "business", "supply"]);
   const aLastRow = XLSX.utils.decode_range(a.sheet["!ref"] || "A1:A1").e.r + 1;
   const bLastRow = XLSX.utils.decode_range(b.sheet["!ref"] || "A1:A1").e.r + 1;
-  const aRows = rowsWithData(a.sheet, a.row + 1, aLastRow, [a.columns.business, a.columns.supply]);
-  const bRows = rowsWithData(b.sheet, b.row + 1, bLastRow, [b.columns.business, b.columns.supply]);
+  const aRows = rowsWithData(a.sheet, a.row + 1, aLastRow, [a.columns.date, a.columns.business, a.columns.supply]);
+  const bRows = rowsWithData(b.sheet, b.row + 1, bLastRow, [b.columns.date, b.columns.business, b.columns.supply]);
   const aGroups = new Map(); const bGroups = new Map();
   let blankA = 0; let blankB = 0;
   for (const row of aRows) {
-    const businessNumber = digits(cellAt(a.sheet, a.columns.business, row));
-    if (businessNumber) add(aGroups, businessNumber, row); else blankA += 1;
+    const key = invoiceKey(a.sheet, a.columns, row);
+    if (key) add(aGroups, key, row); else blankA += 1;
   }
   for (const row of bRows) {
-    const businessNumber = digits(cellAt(b.sheet, b.columns.business, row));
-    if (businessNumber) add(bGroups, businessNumber, row); else blankB += 1;
+    const key = invoiceKey(b.sheet, b.columns, row);
+    if (key) add(bGroups, key, row); else blankB += 1;
   }
 
   let yellow = 0; let red = 0; let countMismatch = 0; let aOnlyRows = blankA; let bOnlyRows = blankB;
-  let matchedRows = 0; let supplyDifferences = 0; let taxDifferences = 0; let unmatchedBRows = 0; let documentTypeMismatches = 0;
+  let matchedRows = 0; let supplyDifferences = 0; let taxDifferences = 0; let unmatchedBRows = 0; let documentTypeMismatches = 0; let ambiguousBRows = 0;
   const paintMissingBRow = (row) => {
     unmatchedBRows += 1;
     for (const key of ["business", "supply", "tax"].filter((key) => b.columns[key])) {
@@ -146,33 +154,35 @@ function compareByBusinessGroups(aBytes, bBytes) {
       if (usable(target)) { color(target, COLORS.missing); red += 1; }
     }
   };
-  for (const row of bRows) if (!digits(cellAt(b.sheet, b.columns.business, row))) paintMissingBRow(row);
+  for (const row of bRows) if (!invoiceKey(b.sheet, b.columns, row)) paintMissingBRow(row);
 
-  const businessNumbers = new Set([...aGroups.keys(), ...bGroups.keys()]);
-  for (const businessNumber of businessNumbers) {
-    const aBusinessRows = aGroups.get(businessNumber) ?? [];
-    const bBusinessRows = bGroups.get(businessNumber) ?? [];
+  const invoiceKeys = new Set([...aGroups.keys(), ...bGroups.keys()]);
+  for (const key of invoiceKeys) {
+    const aBusinessRows = aGroups.get(key) ?? [];
+    const bBusinessRows = bGroups.get(key) ?? [];
     if (aBusinessRows.length !== bBusinessRows.length) countMismatch += 1;
     if (aBusinessRows.length > bBusinessRows.length) aOnlyRows += aBusinessRows.length - bBusinessRows.length;
     if (bBusinessRows.length > aBusinessRows.length) bOnlyRows += bBusinessRows.length - aBusinessRows.length;
 
-    // 사업자번호 그룹 안에서는 공급가액(불공은 공급가액+세액)으로 대응 행을 찾습니다.
-    // 두 파일의 행 순서는 비교에 사용하지 않습니다.
+    // 사업자번호·날짜·문서유형이 같은 그룹 안에서만 비교합니다.
+    // 같은 그룹에 여러 행이 남아 대응 관계가 모호하면 노랑 대신 빨강으로 표시합니다.
     const unusedA = new Set(aBusinessRows);
     const pairs = new Map();
     for (const bRow of bBusinessRows) {
       const exactA = [...unusedA].find((aRow) => isDocumentTypeCompatible(a.sheet, a.columns, aRow, b.columns) && isExactMatch(a.sheet, a.columns, aRow, b.sheet, b.columns, bRow));
       if (exactA !== undefined) { pairs.set(bRow, exactA); unusedA.delete(exactA); }
     }
-    for (const bRow of bBusinessRows) {
-      if (pairs.has(bRow)) continue;
-      const compatibleA = [...unusedA].filter((aRow) => isDocumentTypeCompatible(a.sheet, a.columns, aRow, b.columns));
-      const nearestA = compatibleA.sort((left, right) => differenceCost(a.sheet, a.columns, left, b.sheet, b.columns, bRow) - differenceCost(a.sheet, a.columns, right, b.sheet, b.columns, bRow))[0];
-      if (nearestA === undefined) {
+    const remainingBRows = bBusinessRows.filter((bRow) => !pairs.has(bRow));
+    const compatibleA = [...unusedA].filter((aRow) => isDocumentTypeCompatible(a.sheet, a.columns, aRow, b.columns));
+    if (remainingBRows.length === 1 && compatibleA.length === 1) {
+      pairs.set(remainingBRows[0], compatibleA[0]);
+      unusedA.delete(compatibleA[0]);
+    } else {
+      for (const bRow of remainingBRows) {
         if (aBusinessRows.length > 0 && !aBusinessRows.some((aRow) => isDocumentTypeCompatible(a.sheet, a.columns, aRow, b.columns))) documentTypeMismatches += 1;
-        paintMissingBRow(bRow); continue;
+        else if (aBusinessRows.length > 0) ambiguousBRows += 1;
+        paintMissingBRow(bRow);
       }
-      pairs.set(bRow, nearestA); unusedA.delete(nearestA);
     }
     for (const [bRow, aRow] of pairs) {
       const aSupply = cellAt(a.sheet, a.columns.supply, aRow);
@@ -191,7 +201,7 @@ function compareByBusinessGroups(aBytes, bBytes) {
   }
   return {
     data: XLSX.write(bBook, { type: "array", bookType: "xlsx", cellStyles: true }),
-    yellow, red, countMismatch, aOnlyRows, bOnlyRows, matchedRows, supplyDifferences, taxDifferences, unmatchedBRows, documentTypeMismatches,
+    yellow, red, countMismatch, aOnlyRows, bOnlyRows, matchedRows, supplyDifferences, taxDifferences, unmatchedBRows, documentTypeMismatches, ambiguousBRows,
     aRowCount: aRows.length, bRowCount: bRows.length, bHasTax: Boolean(b.columns.tax), aSheetName: a.name, bSheetName: b.name,
   };
 }
@@ -229,9 +239,10 @@ function renderSummary(result) {
   const notes = [];
   if (result.supplyDifferences) notes.push(summaryNote(`공급가액이 다른 행이 ${result.supplyDifferences}건 있어 B의 공급가액 셀을 노랑으로 표시했습니다.`, "warning"));
   if (result.taxDifferences) notes.push(summaryNote(`불공 행 중 세액이 다른 행이 ${result.taxDifferences}건 있어 B의 세액 셀을 노랑으로 표시했습니다.`, "warning"));
-  if (result.documentTypeMismatches) notes.push(summaryNote(`같은 사업자번호지만 면세/세금계산서 문서 유형이 맞지 않는 B 행이 ${result.documentTypeMismatches}건 있어 빨강으로 표시했습니다.`, "danger"));
-  if (result.unmatchedBRows > result.documentTypeMismatches) notes.push(summaryNote(`A에서 대응 행을 찾지 못한 B 행이 ${result.unmatchedBRows - result.documentTypeMismatches}건 있어 빨강으로 표시했습니다.`, "danger"));
-  if (result.countMismatch) notes.push(summaryNote(`사업자번호별 행 수가 다른 그룹이 ${result.countMismatch}개입니다.`, "danger"));
+  if (result.documentTypeMismatches) notes.push(summaryNote(`같은 사업자번호·날짜지만 면세/세금계산서 문서 유형이 맞지 않는 B 행이 ${result.documentTypeMismatches}건 있어 빨강으로 표시했습니다.`, "danger"));
+  if (result.ambiguousBRows) notes.push(summaryNote(`같은 사업자번호·날짜에 여러 행이 남아 대응 관계가 모호한 B 행이 ${result.ambiguousBRows}건 있어 빨강으로 표시했습니다.`, "danger"));
+  if (result.unmatchedBRows > result.documentTypeMismatches + result.ambiguousBRows) notes.push(summaryNote(`A에서 대응 행을 찾지 못한 B 행이 ${result.unmatchedBRows - result.documentTypeMismatches - result.ambiguousBRows}건 있어 빨강으로 표시했습니다.`, "danger"));
+  if (result.countMismatch) notes.push(summaryNote(`사업자번호·날짜별 행 수가 다른 그룹이 ${result.countMismatch}개입니다.`, "danger"));
   if (result.aOnlyRows) notes.push(summaryNote(`A에만 존재하는 행은 ${result.aOnlyRows}건입니다. B 결과 파일에는 대응할 셀이 없어 상태 정보로만 표시합니다.`, "danger"));
   if (!notes.length) notes.push(summaryNote("사업자번호, 문서 유형, 공급가액 기준으로 모든 B 행이 정상 대응됐습니다."));
   summaryNotes.replaceChildren(...notes);
